@@ -57,11 +57,12 @@ We are grateful to the authors for their contribution of the well-structured cod
 
 If you find this project useful, please cite:
 ```
-@inproceedings{jamma,
-  title={JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba},
-  author={Lu, Xiaoyong and Du, Songlin},
-  booktitle={Proceedings of the CVPR},
-  pages={--},
-  year={2025},
+@misc{lu2025jamma,
+    title={JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba},
+    author={Xiaoyong Lu and Songlin Du},
+    year={2025},
+    eprint={2503.03437},
+    archivePrefix={arXiv},
+    url={https://arxiv.org/abs/2503.03437},
 }
 ```
