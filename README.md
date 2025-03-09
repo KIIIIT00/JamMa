@@ -1,6 +1,11 @@
 # JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba
 
-This is a PyTorch implementation of JamMa for CVPR'25 [paper](https://arxiv.org/abs/2407.07789)  “JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba”.
+[![license](https://img.shields.io/badge/LICENSE-MIT-green)](https://github.com/leoluxxx/JamMa/blob/master/LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2503.03437-red)](https://arxiv.org/abs/2503.03437)
+[![webpage](https://img.shields.io/badge/Webpage-JamMa-blue)](https://leoluxxx.github.io/JamMa-page/)
+[![star](https://img.shields.io/github/stars/leoluxxx/JamMa)](https://github.com/leoluxxx/JamMa)
+
+This is a PyTorch implementation of JamMa for CVPR'25 [paper](https://arxiv.org/abs/2503.03437)  “JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba”.
 
 JamMa is a lightweight image matcher that enables fast internal and mutual interaction of images with joint Mamba.
 
