@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops.einops import rearrange
+from loguru import logger
 INF = 1e9
 
 
@@ -294,18 +295,25 @@ class FineSubMatching(nn.Module):
         # corner case: if no coarse matches found
         if M == 0:
             assert self.training == False, "M is always >0, when training, see coarse_matching.py"
-            # logger.warning('No matches found in coarse-level.')
-            data.update({
-                'mkpts0_f': data['mkpts0_c'],
-                'mkpts1_f': data['mkpts1_c'],
-                'mconf_f': torch.zeros(0, device=feat_f0_unfold.device),
-                'mkpts0_f_train': data['mkpts0_c_train'],
-                'mkpts1_f_train': data['mkpts1_c_train'],
-                'conf_matrix_fine': torch.zeros(1, W_f * W_f, W_f * W_f, device=feat_f0_unfold.device),
-                'b_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
-                'i_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
-                'j_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
-            })
+            logger.warning('No matches found in coarse-level.')
+            if self.inference:
+                data.update({
+                    'mkpts0_f': data['mkpts0_c'],
+                    'mkpts1_f': data['mkpts1_c'],
+                    'mconf_f': torch.zeros(0, device=feat_f0_unfold.device),
+                })
+            else:
+                data.update({
+                    'mkpts0_f': data['mkpts0_c'],
+                    'mkpts1_f': data['mkpts1_c'],
+                    'mconf_f': torch.zeros(0, device=feat_f0_unfold.device),
+                    'mkpts0_f_train': data['mkpts0_c_train'],
+                    'mkpts1_f_train': data['mkpts1_c_train'],
+                    'conf_matrix_fine': torch.zeros(1, W_f * W_f, W_f * W_f, device=feat_f0_unfold.device),
+                    'b_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
+                    'i_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
+                    'j_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
+                })
             return
 
         feat_f0 = self.fine_proj(feat_f0_unfold)
