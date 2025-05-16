@@ -65,9 +65,7 @@ If you find this project useful, please cite:
 @misc{lu2025jamma,
     title={JamMa: Ultra-lightweight Local Feature Matching with Joint Mamba},
     author={Xiaoyong Lu and Songlin Du},
-    year={2025},
-    eprint={2503.03437},
-    archivePrefix={arXiv},
-    url={https://arxiv.org/abs/2503.03437},
+    booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+    year={2025}
 }
 ```
