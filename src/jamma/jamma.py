@@ -107,7 +107,6 @@ class JamMa(nn.Module):
 
     def forward(self, data, mode='test'):
         self.mode = mode
-        """Run SuperGlue on a pair of keypoints and descriptors"""
         data.update({
             'hw0_i': data['imagec_0'].shape[2:],
             'hw1_i': data['imagec_1'].shape[2:],
