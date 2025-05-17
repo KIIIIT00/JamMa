@@ -9,7 +9,7 @@ cd $PROJECT_DIR
 
 data_cfg_path="configs/data/megadepth_test_1500.py"
 main_cfg_path="configs/jamma/outdoor/test.py"
-ckpt_path='weight/jamma_weight.ckpt'
+ckpt_path='official' # your path or 'official' (load from github release)
 dump_dir="dump/jamma_outdoor"
 profiler_name="inference"
 n_nodes=1  # mannually keep this the same with --nodes

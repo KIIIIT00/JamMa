@@ -16,6 +16,11 @@ class CovNextV2_nano(nn.Module):
         self.cnn.stages[2] = None
         self.cnn.stages[3] = None
 
+        state_dict = torch.hub.load_state_dict_from_url(
+            'https://github.com/leoluxxx/JamMa/releases/download/v0.1/convnextv2_nano_pretrain.ckpt',
+            file_name='convnextv2_nano_pretrain.ckpt')
+        self.cnn.load_state_dict(state_dict, strict=True)
+
         self.lin_4 = nn.Conv2d(80, 128, 1)
         self.lin_8 = nn.Conv2d(160, 256, 1)
 

@@ -39,8 +39,14 @@ class PL_JamMa(pl.LightningModule):
         self.matcher = JamMa(config=_config['jamma'], profiler=profiler)
         self.loss = Loss(_config)
 
-        if pretrained_ckpt:
-            state_dict = torch.load(pretrained_ckpt, map_location='cpu')
+        if pretrained_ckpt == 'official':
+            state_dict = torch.hub.load_state_dict_from_url(
+                'https://github.com/leoluxxx/JamMa/releases/download/v0.1/jamma.ckpt',
+                file_name='jamma.ckpt')['state_dict']
+            self.load_state_dict(state_dict, strict=True)
+            logger.info(f"Load Official JamMa Weight")
+        elif pretrained_ckpt:
+            state_dict = torch.load(pretrained_ckpt, map_location='cpu')['state_dict']
             self.load_state_dict(state_dict, strict=True)
             logger.info(f"Load \'{pretrained_ckpt}\' as pretrained checkpoint")
 
