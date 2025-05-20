@@ -5,7 +5,7 @@ import matplotlib
 import cv2
 import torch
 from matplotlib import cm
-
+import matplotlib.patheffects as path_effects
 imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
 imagenet_std = torch.tensor([0.229, 0.224, 0.225])
 
@@ -22,65 +22,15 @@ def _compute_conf_thresh(data):
 
 
 # --- VISUALIZATION --- #
-def make_gt_figure(
+def make_matching_figure_color(
         img0, img1, mkpts0, mkpts1, color,
         kpts0=None, kpts1=None, text=[], dpi=75, path=None):
     # draw image pair
     assert mkpts0.shape[0] == mkpts1.shape[0], f'mkpts0: {mkpts0.shape[0]} v.s. mkpts1: {mkpts1.shape[0]}'
     fig, axes = plt.subplots(1, 2, figsize=(10, 6), dpi=dpi)
-    axes[0].imshow(img0, cmap='gray')
-    axes[1].imshow(img1, cmap='gray')
+    axes[0].imshow(img0)
+    axes[1].imshow(img1)
     for i in range(2):  # clear all frames
-        axes[i].get_yaxis().set_ticks([])
-        axes[i].get_xaxis().set_ticks([])
-        for spine in axes[i].spines.values():
-            spine.set_visible(False)
-    plt.tight_layout(pad=1)
-
-    if kpts0 is not None:
-        assert kpts1 is not None
-        axes[0].scatter(kpts0[:, 0], kpts0[:, 1], c='k', s=4)
-        axes[1].scatter(kpts1[:, 0], kpts1[:, 1], c='k', s=4)
-        axes[0].scatter(kpts0[:, 0], kpts0[:, 1], c='w', s=2)
-        axes[1].scatter(kpts1[:, 0], kpts1[:, 1], c='w', s=2)
-
-    # draw matches
-    if mkpts0.shape[0] != 0 and mkpts1.shape[0] != 0:
-        fig.canvas.draw()
-        transFigure = fig.transFigure.inverted()
-        fkpts0 = transFigure.transform(axes[0].transData.transform(mkpts0))
-        fkpts1 = transFigure.transform(axes[1].transData.transform(mkpts1))
-        fig.lines = [matplotlib.lines.Line2D((fkpts0[i, 0], fkpts1[i, 0]),
-                                             (fkpts0[i, 1], fkpts1[i, 1]),
-                                             transform=fig.transFigure, c=color[i], linewidth=1)
-                     for i in range(len(mkpts0))]
-
-        axes[0].scatter(mkpts0[:, 0], mkpts0[:, 1], c=color, s=4)
-        axes[1].scatter(mkpts1[:, 0], mkpts1[:, 1], c=color, s=4)
-
-    # put txts
-    txt_color = 'k' if img0[:100, :200].mean() > 200 else 'w'
-    fig.text(
-        0.01, 0.99, '\n'.join(text), transform=fig.axes[0].transAxes,
-        fontsize=15, va='top', ha='left', color=txt_color)
-
-    # save or return figure
-    if path:
-        plt.savefig(str(path), bbox_inches='tight', pad_inches=0, dpi=dpi)
-        plt.close()
-    else:
-        return fig
-
-
-def make_matching_figure(
-        img0, img1, mkpts0, mkpts1, color,
-        kpts0=None, kpts1=None, text=[], dpi=75, path=None):
-    # draw image pair
-    assert mkpts0.shape[0] == mkpts1.shape[0], f'mkpts0: {mkpts0.shape[0]} v.s. mkpts1: {mkpts1.shape[0]}'
-    fig, axes = plt.subplots(1, 2, figsize=(10, 6), dpi=dpi)
-    axes[0].imshow(img0, cmap='gray')
-    axes[1].imshow(img1, cmap='gray')
-    for i in range(2):   # clear all frames
         axes[i].get_yaxis().set_ticks([])
         axes[i].get_xaxis().set_ticks([])
         for spine in axes[i].spines.values():
@@ -107,11 +57,11 @@ def make_matching_figure(
         axes[1].scatter(mkpts1[:, 0], mkpts1[:, 1], c=color, s=4)
 
     # put txts
-    txt_color = 'k' if img0[:100, :200].mean() > 200 else 'w'
-    fig.text(
+    txt_color = 'k'
+    text_ = fig.text(
         0.01, 0.99, '\n'.join(text), transform=fig.axes[0].transAxes,
         fontsize=15, va='top', ha='left', color=txt_color)
-
+    text_.set_path_effects([path_effects.Stroke(linewidth=2, foreground='white'), path_effects.Normal()])
     # save or return figure
     if path:
         plt.savefig(str(path), bbox_inches='tight', pad_inches=0, dpi=dpi)
@@ -120,40 +70,12 @@ def make_matching_figure(
         return fig
 
 
-def make_kpt_figure(data, b_id=0, dpi=75, path=None):
-    img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    kpts0 = data['keypoints0'][b_id].cpu().numpy()
-    kpts1 = data['keypoints1'][b_id].cpu().numpy()
-    # draw image pair
-    fig, axes = plt.subplots(1, 2, figsize=(10, 6), dpi=dpi)
-    axes[0].imshow(img0, cmap='gray')
-    axes[1].imshow(img1, cmap='gray')
-    for i in range(2):  # clear all frames
-        axes[i].get_yaxis().set_ticks([])
-        axes[i].get_xaxis().set_ticks([])
-        for spine in axes[i].spines.values():
-            spine.set_visible(False)
-    plt.tight_layout(pad=1)
-
-    axes[0].scatter(kpts0[:, 0], kpts0[:, 1], c='w', s=1)
-
-    axes[1].scatter(kpts1[:, 0], kpts1[:, 1], c='w', s=1)
-
-    # save or return figure
-    if path:
-        plt.savefig(str(path), bbox_inches='tight', pad_inches=0, dpi=dpi)
-        plt.close()
-    else:
-        return fig
-
-
-def _make_evaluation_figure(data, b_id, alpha='dynamic', path=None):
+def make_evaluation_figure_color(data, b_id, alpha='dynamic', path=None, dpi=150):
     b_mask = data['m_bids'] == b_id
     conf_thr = _compute_conf_thresh(data)
 
-    img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
+    img0 = data['imagec_0'][b_id]
+    img1 = data['imagec_1'][b_id]
     kpts0 = data['mkpts0_f'][b_mask].cpu().numpy()
     kpts1 = data['mkpts1_f'][b_mask].cpu().numpy()
 
@@ -161,138 +83,35 @@ def _make_evaluation_figure(data, b_id, alpha='dynamic', path=None):
     if 'scale0' in data:
         kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
         kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
+
+    img0 = img0 * (imagenet_std[:, None, None].to(img0.device)) + (imagenet_mean[:, None, None].to(img0.device))
+    img1 = img1 * (imagenet_std[:, None, None].to(img1.device)) + (imagenet_mean[:, None, None].to(img1.device))
+    img0, img1 = img0.detach().permute(1, 2, 0).cpu().numpy(), img1.detach().permute(1, 2, 0).cpu().numpy()
+    img0, img1 = np.clip(img0, 0.0, 1.0), np.clip(img1, 0.0, 1.0)
 
     epi_errs = data['epi_errs'][b_mask].cpu().numpy()
     correct_mask = epi_errs < conf_thr
     precision = np.mean(correct_mask) if len(correct_mask) > 0 else 0
     n_correct = np.sum(correct_mask)
-    n_gt_matches = int(data['conf_matrix_gt'][b_id].sum().cpu())
-    recall = 0 if n_gt_matches == 0 else n_correct / (n_gt_matches)
+    R_errs = data['R_errs'][b_id][0]
+    t_errs = data['t_errs'][b_id][0]
 
     # matching info
     if alpha == 'dynamic':
         alpha = dynamic_alpha(len(correct_mask))
     color = error_colormap(epi_errs, conf_thr, alpha=alpha)
-    
-    text = [
-        f'#Matches {len(kpts0)}',
-        f'Precision({conf_thr:.2e}) ({100 * precision:.1f}%): {n_correct}/{len(kpts0)}',
-        f'Recall({conf_thr:.2e}) ({100 * recall:.1f}%): {n_correct}/{n_gt_matches}'
-    ]
-    
-    # make the figure
-    figure = make_matching_figure(img0, img1, kpts0, kpts1,
-                                  color, text=text, path=path)
-    return figure
-
-
-def _make_evaluation_figure_coarse(data, b_id, alpha='dynamic', path=None, dpi=75):
-    b_mask = data['m_bids'] == b_id
-    conf_thr = _compute_conf_thresh(data)
-
-    img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    kpts0 = data['mkpts0_f'][b_mask].cpu().numpy()
-    kpts1 = data['mkpts1_f'][b_mask].cpu().numpy()
-
-    # for megadepth, we visualize matches on the resized image
-    if 'scale0' in data:
-        kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
-        kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
-
-    correct_mask = data['correct_flag'][b_id].cpu().numpy()
-    precision = data['precision'][b_id].cpu().numpy()
-    n_correct = np.sum(correct_mask)
-    n_gt_matches = int(data['conf_matrix_gt'][b_id].sum().cpu())
-    recall = data['recall'][b_id].cpu().numpy()
-    # recall might be larger than 1, since the calculation of conf_matrix_gt
-    # uses groundtruth depths and camera poses, but epipolar distance is used here.
-
-    # matching info
-    if alpha == 'dynamic':
-        alpha = dynamic_alpha(len(correct_mask))
-    errs = np.stack([0 if acc else 1 for acc in correct_mask]) if len(correct_mask)>0 else np.empty([])
-    color = error_colormap(errs, conf_thr, alpha=alpha)
-
-    text = [
-        f'#Matches {len(kpts0)}',
-        f'Precision({conf_thr:.2e}) ({100 * precision:.1f}%): {n_correct}/{len(kpts0)}',
-        f'Recall({conf_thr:.2e}) ({100 * recall:.1f}%): {n_correct}/{n_gt_matches}'
-    ]
-
-    # make the figure
-    figure = make_matching_figure(img0, img1, kpts0, kpts1,
-                                  color, text=text, path=path, dpi=dpi)
-    return figure
-
-
-def _make_evaluation_figure_test(data, b_id, alpha='dynamic', path=None, dpi=150):
-    b_mask = data['m_bids'] == b_id
-    conf_thr = _compute_conf_thresh(data)
-
-    img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-    kpts0 = data['mkpts0_f'][b_mask].cpu().numpy()
-    kpts1 = data['mkpts1_f'][b_mask].cpu().numpy()
-
-    # for megadepth, we visualize matches on the resized image
-    if 'scale0' in data:
-        kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
-        kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
-
-    epi_errs = data['epi_errs'][b_mask].cpu().numpy()
-    correct_mask = epi_errs < conf_thr
-    precision = np.mean(correct_mask) if len(correct_mask) > 0 else 0
-    n_correct = np.sum(correct_mask)
-    R_errs = data['R_errs'][b_id]
-    t_errs = data['t_errs'][b_id]
-
-    # matching info
-    if alpha == 'dynamic':
-        alpha = dynamic_alpha(len(correct_mask))
-    color = error_colormap(epi_errs, conf_thr, alpha=alpha)
-
+    runtime = data['runtime']
     text = [
         f'#Matches {len(kpts0)}',
         f'Precision({conf_thr:.2e}) ({100 * precision:.1f}%): {n_correct}/{len(kpts0)}',
         f'R_errs: {R_errs:.1f}',
-        f't_errs: {t_errs:.1f}'
+        f't_errs: {t_errs:.1f}',
+        f'runtime: {runtime:.1f}',
     ]
 
     # make the figure
-    figure = make_matching_figure(img0, img1, kpts0, kpts1,
+    figure = make_matching_figure_color(img0, img1, kpts0, kpts1,
                                   color, text=text, path=path, dpi=dpi)
-    return figure
-
-
-def _make_gt_figure(data, switch=None, path=None, dpi=75):
-    b_id = 0
-    switch = switch[b_id] if switch is not None else False
-    if switch:
-        b_ids, i_ids, j_ids = data['spv_b_ids'], data['spv_i_ids'], data['spv_j_ids']
-        img0 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-        img1 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-        mkpts0 = data['keypoints0'][b_ids, i_ids].cpu().numpy()
-        mkpts1 = data['keypoints1'][b_ids, j_ids].cpu().numpy()
-        kpts0 = data['keypoints0'].squeeze().cpu().numpy()
-        kpts1 = data['keypoints1'][:, data['mask0'].squeeze().view(-1)].squeeze().cpu().numpy()
-    else:
-        b_ids, i_ids, j_ids = data['spv_b_ids'], data['spv_i_ids'], data['spv_j_ids']
-        img0 = (data['image0'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-        img1 = (data['image1'][b_id][0].cpu().numpy() * 255).round().astype(np.int32)
-        mkpts0 = data['keypoints0'][b_ids, i_ids].cpu().numpy()
-        mkpts1 = data['keypoints1'][b_ids, j_ids].cpu().numpy()
-        kpts0 = data['keypoints0'].squeeze().cpu().numpy()
-        # kpts0 = data['keypoints0'][:, data['mask0'].squeeze().view(-1)].squeeze().cpu().numpy()
-        kpts1 = data['keypoints1'][:, data['mask1'].squeeze().view(-1)].squeeze().cpu().numpy()
-    text = [
-        f'#GT Matches {len(mkpts0)}',
-    ]
-    color = np.zeros((mkpts1.shape[0], 4))
-    color[:, :] = 1
-    # make the figure
-    figure = make_gt_figure(img0, img1, mkpts0, mkpts1,
-                                  color, kpts0=kpts0, kpts1=kpts1, text=text, path=path, dpi=dpi)
     return figure
 
 
@@ -430,7 +249,7 @@ def vis_matches(image0, image1, kp0, kp1):
     return vis
 
 
-def make_evaluation_figure_wheel(data, b_id, path=None, topk=10000):
+def make_evaluation_figure_wheel(data, b_id=0, path=None, topk=10000):
     b_mask = data['m_bids'] == b_id
 
     img0 = data['imagec_0'][b_id]
@@ -465,9 +284,9 @@ def make_evaluation_figure_wheel(data, b_id, path=None, topk=10000):
     return figure
 
 
-def make_confidence_figure(data, path=None, dpi=150, topk=10000):
-    img0 = data['imagec_0'][0]
-    img1 = data['imagec_1'][0]
+def make_confidence_figure(data, b_id=0, path=None, dpi=150, topk=10000):
+    img0 = data['imagec_0'][b_id]
+    img1 = data['imagec_1'][b_id]
     img0 = img0 * (imagenet_std[:, None, None].to(img0.device)) + (imagenet_mean[:, None, None].to(img0.device))
     img1 = img1 * (imagenet_std[:, None, None].to(img1.device)) + (imagenet_mean[:, None, None].to(img1.device))
     img0, img1 = img0.detach().permute(1, 2, 0).cpu().numpy(), img1.detach().permute(1, 2, 0).cpu().numpy()
@@ -478,8 +297,8 @@ def make_confidence_figure(data, path=None, dpi=150, topk=10000):
     kpts0 = data['mkpts0_f'][idx].detach().cpu().numpy()
     kpts1 = data['mkpts1_f'][idx].detach().cpu().numpy()
     if 'scale0' in data:
-        kpts0 = kpts0 / data['scale0'][0].cpu().numpy()[[1, 0]]
-        kpts1 = kpts1 / data['scale1'][0].cpu().numpy()[[1, 0]]
+        kpts0 = kpts0 / data['scale0'][b_id].cpu().numpy()[[1, 0]]
+        kpts1 = kpts1 / data['scale1'][b_id].cpu().numpy()[[1, 0]]
     score = data['mconf_f'][idx].cpu().numpy()
     color = cm.jet(score)
 
@@ -487,11 +306,12 @@ def make_confidence_figure(data, path=None, dpi=150, topk=10000):
         f'#Matches {len(kpts0)}',
     ]
     # make the figure
-    make_matching_figure(img0, img1, kpts0, kpts1,
+    fig = make_matching_figure_color(img0, img1, kpts0, kpts1,
                                   color, text=text, path=path, dpi=dpi)
+    return fig
 
 
-def make_matching_figures(data, config, mode='evaluation', path=None, dpi=150):
+def make_matching_figures(data, mode='evaluation', path=None, dpi=150):
     """ Make matching figures for a batch.
     
     Args:
@@ -500,24 +320,15 @@ def make_matching_figures(data, config, mode='evaluation', path=None, dpi=150):
     Returns:
         figures (Dict[str, List[plt.figure]]
     """
-    assert mode in ['evaluation', 'confidence', 'test', 'wheel', 'coarse']  # 'confidence'
+    assert mode in ['confidence', 'evaluation', 'wheel']  # 'confidence'
     figures = {mode: []}
-    for b_id in range(data['image0'].size(0)):
-        if mode == 'evaluation':
-            fig = _make_evaluation_figure(
-                data, b_id,
-                alpha=config.TRAINER.PLOT_MATCHES_ALPHA)
-        elif mode == 'test':
-            fig = _make_evaluation_figure_test(
-                data, b_id,
-                alpha=config.TRAINER.PLOT_MATCHES_ALPHA, path=path, dpi=dpi)
-        elif mode == 'coarse':
-            fig = _make_evaluation_figure_coarse(
-                data, b_id,
-                alpha=config.TRAINER.PLOT_MATCHES_ALPHA, path=path, dpi=dpi)
+    for b_id in range(data['imagec_0'].size(0)):
+        if mode == 'confidence':
+            fig = make_confidence_figure(data, b_id, dpi=dpi, path=path)
+        elif mode == 'evaluation':
+            fig = make_evaluation_figure_color(data, b_id, dpi=dpi, path=path)
         elif mode == 'wheel':
-            fig = make_evaluation_figure_wheel(
-                data, b_id, path=path)
+            fig = make_evaluation_figure_wheel(data, b_id, path=path)
         else:
             raise ValueError(f'Unknown plot mode: {mode}')
         figures[mode].append(fig)

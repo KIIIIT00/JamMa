@@ -28,7 +28,7 @@ if __name__ == '__main__':
     Path(opt.output_dir).mkdir(exist_ok=True, parents=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    jamma = JamMa(pretrained='../weight/jamma_weight.ckpt', config=cfg).eval().to(device)
+    jamma = JamMa(config=cfg).eval().to(device)
 
     image0, scale0, mask0, prepad_size0 = read_megadepth_color(opt.image1, 832, 16, True)
     image1, scale1, mask1, prepad_size1 = read_megadepth_color(opt.image2, 832, 16, True)
@@ -46,5 +46,5 @@ if __name__ == '__main__':
     logger.info(f"Finish Matching, Visualizing")
 
     make_confidence_figure(data, path=opt.output_dir+'viz1.png', dpi=300, topk=4000)
-    make_evaluation_figure_wheel(data, 0, path=opt.output_dir+'viz2.png', topk=4000)
+    make_evaluation_figure_wheel(data, path=opt.output_dir+'viz2.png', topk=4000)
     logger.info(f"Done")

@@ -22,6 +22,7 @@ from src.utils.comm import gather, all_gather
 from src.utils.misc import lower_config, flattenList
 from src.utils.profiler import PassThroughProfiler
 from thop import profile
+from src.utils.plotting import make_matching_figures
 
 
 class PL_JamMa(pl.LightningModule):
@@ -33,7 +34,8 @@ class PL_JamMa(pl.LightningModule):
         self.JAMMA_cfg = lower_config(_config['jamma'])
         self.profiler = profiler or PassThroughProfiler()
         self.n_vals_plot = max(config.TRAINER.N_VAL_PAIRS_TO_PLOT // config.TRAINER.WORLD_SIZE, 1)
-
+        self.viz_path = Path('visualization')
+        self.viz_path.mkdir(parents=True, exist_ok=True)
         # Matcher: JamMa
         self.backbone = CovNextV2_nano()
         self.matcher = JamMa(config=_config['jamma'], profiler=profiler)
@@ -257,6 +259,12 @@ class PL_JamMa(pl.LightningModule):
             batch['runtime'] = self.start_event.elapsed_time(self.end_event)
 
         ret_dict, rel_pair_names = self._compute_metrics(batch)
+
+        # Visualization #
+        # path = str(self.viz_path) + '/' + str(batch_idx)
+        # make_matching_figures(batch, 'confidence', path=path+'_confidence.png')
+        # make_matching_figures(batch, 'evaluation', path=path+'_evaluation.png')
+        # make_matching_figures(batch, 'wheel', path=path+'_wheel.png')
 
         with self.profiler.profile("dump_results"):
             if self.dump_dir is not None:

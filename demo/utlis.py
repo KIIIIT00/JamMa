@@ -6,13 +6,19 @@ from loguru import logger
 
 
 class JamMa(nn.Module):
-    def __init__(self, pretrained, config) -> None:
+    def __init__(self, config, pretrained='official') -> None:
         super().__init__()
         self.backbone = CovNextV2_nano()
         self.matcher = JamMa_(config)
 
-        if pretrained:
-            state_dict = torch.load(pretrained, map_location='cpu')
+        if pretrained == 'official':
+            state_dict = torch.hub.load_state_dict_from_url(
+                'https://github.com/leoluxxx/JamMa/releases/download/v0.1/jamma.ckpt',
+                file_name='jamma.ckpt')['state_dict']
+            self.load_state_dict(state_dict, strict=True)
+            logger.info(f"Load Official JamMa Weight")
+        elif pretrained:
+            state_dict = torch.load(pretrained, map_location='cpu')['state_dict']
             self.load_state_dict(state_dict, strict=True)
             logger.info(f"Load \'{pretrained}\' as pretrained checkpoint")
 
