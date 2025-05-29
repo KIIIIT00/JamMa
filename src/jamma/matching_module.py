@@ -285,7 +285,7 @@ class FineSubMatching(nn.Module):
         self.subpixel_mlp = nn.Sequential(nn.Linear(2 * dim_f, 2 * dim_f, bias=False),
                                           nn.ReLU(),
                                           nn.Linear(2 * dim_f, 4, bias=False))
-        self.fine_spv_max = None  # saving memory
+        self.fine_spv_max = 500  # saving memory
         self.profiler = profiler
 
     def forward(self, feat_f0_unfold, feat_f1_unfold, data):
