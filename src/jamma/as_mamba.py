@@ -45,8 +45,8 @@ class AS_Mamba(nn.Module):
 
         # Keypoint encoder for position encoding
         # TODO: coarse.d_modelの値によって変化
-        # self.kenc = KeypointEncoder_wo_score(self.d_model_c, [32, 64, 128, self.d_model_c])
-        self.kenc = KeypointEncoder_wo_score(self.d_model_c, [128, self.d_model_c])
+        self.kenc = KeypointEncoder_wo_score(self.d_model_c, [32, 64, 128, self.d_model_c])
+        # self.kenc = KeypointEncoder_wo_score(self.d_model_c, [128, self.d_model_c])
         
         # Mamba Initializer - Multi-Head version for initial global feature interaction
         self.mamba_initializer = JointMambaMultiHead(
@@ -103,13 +103,13 @@ class AS_Mamba(nn.Module):
         sophisticated multi-block adaptive processing.
         """
         # Extract and prepare features
-        desc0, desc1 = data['feat_8_0'], data['feat_8_1']
+        # desc0, desc1 = data['feat_8_0'], data['feat_8_1']
         
-        desc0 = self.coarse_adapter(desc0)
-        desc1 = self.coarse_adapter(desc1)
+        # desc0 = self.coarse_adapter(desc0)
+        # desc1 = self.coarse_adapter(desc1)
 
-        desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
-        # desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
+        # desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
+        desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
         kpts0, kpts1 = data['grid_8'], data['grid_8']
         
         # Keypoint normalization
