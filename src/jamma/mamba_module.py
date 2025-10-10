@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import math
+from typing import Tuple
 from src.jamma.utils.utils import GLU_3
 from mamba_ssm import Mamba
 from functools import partial
@@ -441,7 +442,7 @@ class MultiHeadMambaBlock(nn.Module):
             self, 
             x: torch.Tensor, 
             inference_params=None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the Multi-Head Mamba Block.
         
@@ -526,13 +527,14 @@ def create_multihead_block(
     
     # Create the multi-head block
     block = MultiHeadMambaBlock(
-        d_model,
+        dim = d_model,
         d_geom=d_geom,
         mixer_cls=mixer_cls,
-        norm_cls=norm_cls,
         fused_add_norm=fused_add_norm,
         residual_in_fp32=residual_in_fp32,
         drop_path=drop_path,
+        rms_norm = rms_norm,
+        norm_epsilon = norm_epsilon
     )
     
     # Store layer index for debugging/visualization
@@ -600,7 +602,7 @@ class MultiHeadMambaBlock(nn.Module):
                 self.norm, (nn.LayerNorm, RMSNorm)
             ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
 
-    def forward(self, x: torch.Tensor, inference_params=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, inference_params=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass returning both matching and geometry features."""
         residual = x
         
@@ -670,13 +672,24 @@ def create_multihead_block(
 class Block(nn.Module):
     """Standard Mamba block for backward compatibility."""
     def __init__(
-            self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False, drop_path=0.,
+            self, 
+            dim: int,
+            d_geom: int = None,
+            mixer_cls = None, 
+            fused_add_norm: bool=False, 
+            residual_in_fp32: bool =False, 
+            drop_pat: float =0.,
+            rms_norm: bool = False,
+            norm_epsilon: float = 1e-5
     ):
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         self.mixer = mixer_cls(dim)
-        self.norm = norm_cls(dim)
+        if rms_norm:
+            self.norm = RMSNorm(dim, eps=norm_epsilon)
+        else:
+            self.norm = nn.LayerNorm(dim, eps=norm_epsilon)
         if self.fused_add_norm:
             assert RMSNorm is not None, "RMSNorm import fails"
             assert isinstance(
@@ -809,12 +822,13 @@ class JointMambaMultiHead(nn.Module):
                 y_geom_list.append(y_geom.transpose(2, 3))
         
         # Merge and aggregate matching features
-        y_match = y_match_list[-1] if len(y_match_list) > 0 else torch.stack([y0_match, y1_match, y2_match, y3_match], 1).transpose(2, 3)
+        # y_match = y_match_list[-1] if len(y_match_list) > 0 else torch.stack([y0_match, y1_match, y2_match, y3_match], 1).transpose(2, 3)
+        y_match = y_match_list[-1] if y_match_list else x.transpose(2, 3)
         desc0_match, desc1_match = merge_jego(y_match, ori_h, ori_w, 2)
         desc_match = self.aggregator(torch.cat([desc0_match, desc1_match], 0))
         desc0_match, desc1_match = torch.chunk(desc_match, 2, dim=0)
-        desc0_match = desc0_match.flatten(2, 3)
-        desc1_match = desc1_match.flatten(2, 3)
+        # desc0_match = desc0_match.flatten(2, 3)
+        # desc1_match = desc1_match.flatten(2, 3)
         
         # Update data
         data.update({
@@ -823,20 +837,43 @@ class JointMambaMultiHead(nn.Module):
         })
         
         # Optionally process geometric features
-        if self.return_geometry and len(y_geom_list) > 0:
-            y_geom = y_geom_list[-1]
-            desc0_geom, desc1_geom = merge_jego(y_geom, ori_h, ori_w, 2)
+        # if self.return_geometry and len(y_geom_list) > 0:
+        #     y_geom = y_geom_list[-1]
+        #     desc0_geom, desc1_geom = merge_jego(y_geom, ori_h, ori_w, 2)
             
-            if hasattr(self, 'aggregator_geom'):
-                desc_geom = self.aggregator_geom(torch.cat([desc0_geom, desc1_geom], 0))
-                desc0_geom, desc1_geom = torch.chunk(desc_geom, 2, dim=0)
+        #     if hasattr(self, 'aggregator_geom'):
+        #         desc_geom = self.aggregator_geom(torch.cat([desc0_geom, desc1_geom], 0))
+        #         desc0_geom, desc1_geom = torch.chunk(desc_geom, 2, dim=0)
             
-            desc0_geom = desc0_geom.flatten(2, 3)
-            desc1_geom = desc1_geom.flatten(2, 3)
+        #     # desc0_geom = desc0_geom.flatten(2, 3)
+        #     # desc1_geom = desc1_geom.flatten(2, 3)
             
+        #     data.update({
+        #         'feat_geom_0': desc0_geom,
+        #         'feat_geom_1': desc1_geom,
+        #     })
+        if self.return_geometry:  # ★ 1. まず return_geometry が True かだけをチェック
+            if len(y_geom_list) > 0:
+                # --- 従来通りの処理 (depth >= 4 の場合) ---
+                y_geom = y_geom_list[-1]
+                desc0_geom, desc1_geom = merge_jego(y_geom, ori_h, ori_w, 2)
+                
+                if hasattr(self, 'aggregator_geom'):
+                    desc_geom = self.aggregator_geom(torch.cat([desc0_geom, desc1_geom], 0))
+                    desc0_geom, desc1_geom = torch.chunk(desc_geom, 2, dim=0)
+            
+            else:
+                # ★ 2. フォールバック処理を追加 (depth < 4 の場合) ★
+                # Mambaブロックが実行されなかった場合、後続処理のために
+                # 正しい形状のゼロ行列を生成する
+                B, _, H, W = desc0.shape # 入力マッチング特徴量の形状を取得
+                desc0_geom = torch.zeros(B, self.d_geom, H, W, device=desc0.device, dtype=desc0.dtype)
+                desc1_geom = torch.zeros(B, self.d_geom, H, W, device=desc1.device, dtype=desc1.dtype)
+
+            # このブロックは return_geometry=True なら必ず実行される
             data.update({
-                'feat_geom_0': desc0_geom,
-                'feat_geom_1': desc1_geom,
+                'feat_geom_0': desc0_geom.flatten(2, 3) if desc0_geom.ndim > 3 else desc0_geom,
+                'feat_geom_1': desc1_geom.flatten(2, 3) if desc1_geom.ndim > 3 else desc1_geom,
             })
 
 

@@ -16,10 +16,14 @@ _CN.AS_MAMBA.FINE_WINDOW_SIZE = 5  # Window size for fine-level matching
 
 # Model architecture
 _CN.AS_MAMBA.COARSE = CN()
-_CN.AS_MAMBA.COARSE.D_MODEL = 256  # Dimension of coarse features
+_CN.AS_MAMBA.COARSE.D_MODEL = 128  # Dimension of coarse features
 
 _CN.AS_MAMBA.FINE = CN()
 _CN.AS_MAMBA.FINE.D_MODEL = 64  # Dimension of fine features
+_CN.AS_MAMBA.FINE.TOP_K = 2
+_CN.AS_MAMBA.FINE.ACCEPT_SCORE = 0.2
+_CN.AS_MAMBA.FINE.ACCEPT_PEAKINESS = 0.95
+_CN.AS_MAMBA.FINE.DSMAX_TEMPERATURE = 0.1 
 
 # AS-Mamba specific configurations
 _CN.AS_MAMBA.N_BLOCKS = 3  # Number of AS-Mamba blocks

@@ -61,28 +61,26 @@ def test_as_mamba_model():
     
     # Convert to dict format expected by model
     config_dict = {
-        'coarse': {
-            'd_model': config.AS_MAMBA.COARSE.D_MODEL
-        },
-        'fine': {
-            'd_model': config.AS_MAMBA.FINE.D_MODEL
-        },
+        'coarse': {'d_model': config.AS_MAMBA.COARSE.D_MODEL},
+        'fine': {'d_model': config.AS_MAMBA.FINE.D_MODEL,
+                 'dsmax_temperature': 0.1,
+                 'inference': True,
+                 'thr': 0.2,
+                 },
         'resolution': config.AS_MAMBA.RESOLUTION,
         'fine_window_size': config.AS_MAMBA.FINE_WINDOW_SIZE,
         'match_coarse': {
-            'thr': config.AS_MAMBA.MATCH_COARSE.THR,
-            'use_sm': config.AS_MAMBA.MATCH_COARSE.USE_SM,
-            'border_rm': config.AS_MAMBA.MATCH_COARSE.BORDER_RM,
-            'dsmax_temperature': config.AS_MAMBA.MATCH_COARSE.DSMAX_TEMPERATURE,
-            'inference': True  # Set to inference mode for testing
+            'thr': 0.2, 'use_sm': True, 'border_rm': 2,
+            'dsmax_temperature': 0.1, 'inference': True
         },
         'as_mamba': {
-            'n_blocks': config.AS_MAMBA.N_BLOCKS,
-            'd_geom': config.AS_MAMBA.D_GEOM,
-            'use_kan_flow': config.AS_MAMBA.USE_KAN_FLOW,
-            'global_depth': config.AS_MAMBA.GLOBAL_DEPTH,
-            'local_depth': config.AS_MAMBA.LOCAL_DEPTH,
-            'use_geom_for_fine': config.AS_MAMBA.USE_GEOM_FOR_FINE
+            'n_blocks': 1,  # Reduce for memory test
+            'd_geom': 32,
+            'use_kan_flow': False,
+            'global_depth': 1,
+            'local_depth': 1,
+            'use_geom_for_fine': False,
+            'window_size': 2 
         }
     }
     
@@ -154,7 +152,11 @@ def test_memory_usage():
     config = get_cfg_defaults()
     config_dict = {
         'coarse': {'d_model': config.AS_MAMBA.COARSE.D_MODEL},
-        'fine': {'d_model': config.AS_MAMBA.FINE.D_MODEL},
+        'fine': {'d_model': config.AS_MAMBA.FINE.D_MODEL,
+                 'dsmax_temperature': 0.1,
+                 'inference': True,
+                 'thr': 0.2,
+                 },
         'resolution': config.AS_MAMBA.RESOLUTION,
         'fine_window_size': config.AS_MAMBA.FINE_WINDOW_SIZE,
         'match_coarse': {
@@ -162,12 +164,13 @@ def test_memory_usage():
             'dsmax_temperature': 0.1, 'inference': True
         },
         'as_mamba': {
-            'n_blocks': 2,  # Reduce for memory test
+            'n_blocks': 1,  # Reduce for memory test
             'd_geom': 32,
             'use_kan_flow': False,
-            'global_depth': 2,
-            'local_depth': 2,
-            'use_geom_for_fine': False
+            'global_depth': 1,
+            'local_depth': 1,
+            'use_geom_for_fine': False,
+            'window_size': 2
         }
     }
     

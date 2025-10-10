@@ -42,7 +42,8 @@ class AS_Mamba_Block(nn.Module):
         global_depth: int = 4,
         local_depth: int = 4,
         dropout: float = 0.1,
-        use_kan_flow: bool = False
+        use_kan_flow: bool = False,
+        window_size: int = 12
     ):
         super().__init__()
         self.d_model = d_model
@@ -81,7 +82,8 @@ class AS_Mamba_Block(nn.Module):
             feature_dim=d_model,
             depth=local_depth,
             d_geom=d_geom,
-            dropout=dropout
+            dropout=dropout,
+            window_size=8
         )
         
         # Feature aggregation and update (FFN)
@@ -147,8 +149,10 @@ class AS_Mamba_Block(nn.Module):
         # Step 2: Global Path - Process downsampled features
         # Prepare data for global Mamba
         global_data = {
-            'feat_8_0': self.downsample(feat_match_0).flatten(2, 3),
-            'feat_8_1': self.downsample(feat_match_1).flatten(2, 3),
+            # 'feat_8_0': self.downsample(feat_match_0).flatten(2, 3),
+            # 'feat_8_1': self.downsample(feat_match_1).flatten(2, 3),
+            'feat_8_0': self.downsample(feat_match_0),
+            'feat_8_1': self.downsample(feat_match_1),
             'bs': data['bs'],
             'h_8': data['h_8'] // 2,
             'w_8': data['w_8'] // 2
@@ -215,17 +219,20 @@ class LocalAdaptiveMamba(nn.Module):
         feature_dim: int = 256,
         depth: int = 4,
         d_geom: int = 64,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        window_size: int = 4
     ):
         super().__init__()
         self.feature_dim = feature_dim
         self.d_geom = d_geom
+
+        unfolded_feature_dim = feature_dim * window_size * window_size
         
         # Local Mamba blocks
         from .mamba_module import create_multihead_block
         self.mamba_blocks = nn.ModuleList([
             create_multihead_block(
-                d_model=feature_dim,
+                d_model=self.feature_dim,
                 d_geom=d_geom,
                 rms_norm=True,
                 residual_in_fp32=True,
@@ -276,10 +283,14 @@ class LocalAdaptiveMamba(nn.Module):
         windows_1 = F.unfold(feat_match_1_padded, kernel_size=avg_span, stride=1)
         
         # Reshape for processing
-        windows_0 = rearrange(windows_0, 'b (c k) (h w) -> b (h w) (k c)', 
-                            c=C, h=H, w=W, k=avg_span**2)
-        windows_1 = rearrange(windows_1, 'b (c k) (h w) -> b (h w) (k c)', 
-                            c=C, h=H, w=W, k=avg_span**2)
+        # windows_0 = rearrange(windows_0, 'b (c k) (h w) -> b (h w) (k c)', 
+        #                     c=C, h=H, w=W, k=avg_span**2)
+        # windows_1 = rearrange(windows_1, 'b (c k) (h w) -> b (h w) (k c)', 
+        #                     c=C, h=H, w=W, k=avg_span**2)
+        windows_0 = rearrange(windows_0, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
+                              k1=avg_span, k2=avg_span, c=C)
+        windows_1 = rearrange(windows_1, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
+                              k1=avg_span, k2=avg_span, c=C)
         
         # Process through Mamba blocks
         for block in self.mamba_blocks:

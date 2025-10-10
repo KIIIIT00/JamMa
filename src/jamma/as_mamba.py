@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from einops.einops import rearrange
+from torch.utils.checkpoint import checkpoint
 from src.jamma.utils.utils import KeypointEncoder_wo_score, up_conv4, MLPMixerEncoderLayer, normalize_keypoints
 from src.jamma.mamba_module import JointMambaMultiHead
 from src.jamma.as_mamba_block import AS_Mamba_Block
@@ -39,9 +40,13 @@ class AS_Mamba(nn.Module):
         self.use_kan_flow = config.get('as_mamba', {}).get('use_kan_flow', False)  # Use KAN for flow prediction
         self.global_depth = config.get('as_mamba', {}).get('global_depth', 4)  # Depth for global Mamba
         self.local_depth = config.get('as_mamba', {}).get('local_depth', 4)    # Depth for local Mamba
+        
+        self.coarse_adapter = nn.Conv2d(256, self.d_model_c, kernel_size=1)
 
         # Keypoint encoder for position encoding
-        self.kenc = KeypointEncoder_wo_score(self.d_model_c, [32, 64, 128, self.d_model_c])
+        # TODO: coarse.d_modelの値によって変化
+        # self.kenc = KeypointEncoder_wo_score(self.d_model_c, [32, 64, 128, self.d_model_c])
+        self.kenc = KeypointEncoder_wo_score(self.d_model_c, [128, self.d_model_c])
         
         # Mamba Initializer - Multi-Head version for initial global feature interaction
         self.mamba_initializer = JointMambaMultiHead(
@@ -98,7 +103,13 @@ class AS_Mamba(nn.Module):
         sophisticated multi-block adaptive processing.
         """
         # Extract and prepare features
-        desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
+        desc0, desc1 = data['feat_8_0'], data['feat_8_1']
+        
+        desc0 = self.coarse_adapter(desc0)
+        desc1 = self.coarse_adapter(desc1)
+
+        desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
+        # desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
         kpts0, kpts1 = data['grid_8'], data['grid_8']
         
         # Keypoint normalization
