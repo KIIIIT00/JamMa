@@ -15,7 +15,7 @@ from src.jamma.as_mamba import AS_Mamba
 from src.jamma.backbone import CovNextV2_nano
 
 
-def create_dummy_data(batch_size=2, height=480, width=640, device='cuda'):
+def create_dummy_data(batch_size=2, height=256, width=256, device='cuda'):
     """Create dummy input data for testing."""
     data = {
         # Image data

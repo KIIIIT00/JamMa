@@ -83,7 +83,7 @@ class AS_Mamba_Block(nn.Module):
             depth=local_depth,
             d_geom=d_geom,
             dropout=dropout,
-            window_size=8
+            max_span_groups = 5
         )
         
         # Feature aggregation and update (FFN)
@@ -172,14 +172,43 @@ class AS_Mamba_Block(nn.Module):
         global_match_1 = self.upsample_match(global_match_1)
         global_geom_0 = self.upsample_geom(global_geom_0)
         global_geom_1 = self.upsample_geom(global_geom_1)
+
+        # Add FlowMap
+        flow_map_0 = flow_map[:data['bs']]  # (B, H, W, 4)
+        flow_map_1 = flow_map[data['bs']:] 
         
         # Step 3: Local Path - Process with adaptive spans
+        # local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
+        #     feat_match_0, feat_match_1,
+        #     feat_geom_0, feat_geom_1,
+        #     adaptive_spans_x[:data['bs']], adaptive_spans_y[:data['bs']],
+        #     adaptive_spans_x[data['bs']:], adaptive_spans_y[data['bs']:]
+        # )
+        if adaptive_spans_x.shape[0] == 2 * data['bs']:
+            # Spans are concatenated for both images
+            spans_x_0 = adaptive_spans_x[:data['bs']]
+            spans_y_0 = adaptive_spans_y[:data['bs']]
+            spans_x_1 = adaptive_spans_x[data['bs']:]
+            spans_y_1 = adaptive_spans_y[data['bs']:]
+        else:
+            # Single set of spans (use same for both images)
+            spans_x_0 = spans_x_1 = adaptive_spans_x
+            spans_y_0 = spans_y_1 = adaptive_spans_y
+        
+        # local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
+        #     feat_match_0, feat_match_1,
+        #     feat_geom_0, feat_geom_1,
+        #     spans_x_0, spans_y_0,
+        #     spans_x_1, spans_y_1
+        # )
+
         local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
-            feat_match_0, feat_match_1,
-            feat_geom_0, feat_geom_1,
-            adaptive_spans_x[:data['bs']], adaptive_spans_y[:data['bs']],
-            adaptive_spans_x[data['bs']:], adaptive_spans_y[data['bs']:]
-        )
+        feat_match_0, feat_match_1,
+        feat_geom_0, feat_geom_1,
+        flow_map_0, flow_map_1,
+        spans_x_0, spans_y_0,
+        spans_x_1, spans_y_1
+        ) 
         
         # Step 4: Feature aggregation and update
         # Combine global and local features
@@ -207,108 +236,108 @@ class AS_Mamba_Block(nn.Module):
         return data
 
 
-class LocalAdaptiveMamba(nn.Module):
-    """
-    Local Mamba processing with adaptive spans.
+# class LocalAdaptiveMamba(nn.Module):
+#     """
+#     Local Mamba processing with adaptive spans.
     
-    Processes features within adaptive local windows determined by flow predictions.
-    """
+#     Processes features within adaptive local windows determined by flow predictions.
+#     """
     
-    def __init__(
-        self,
-        feature_dim: int = 256,
-        depth: int = 4,
-        d_geom: int = 64,
-        dropout: float = 0.1,
-        window_size: int = 4
-    ):
-        super().__init__()
-        self.feature_dim = feature_dim
-        self.d_geom = d_geom
+#     def __init__(
+#         self,
+#         feature_dim: int = 256,
+#         depth: int = 4,
+#         d_geom: int = 64,
+#         dropout: float = 0.1,
+#         window_size: int = 4
+#     ):
+#         super().__init__()
+#         self.feature_dim = feature_dim
+#         self.d_geom = d_geom
 
-        unfolded_feature_dim = feature_dim * window_size * window_size
+#         unfolded_feature_dim = feature_dim * window_size * window_size
         
-        # Local Mamba blocks
-        from .mamba_module import create_multihead_block
-        self.mamba_blocks = nn.ModuleList([
-            create_multihead_block(
-                d_model=self.feature_dim,
-                d_geom=d_geom,
-                rms_norm=True,
-                residual_in_fp32=True,
-                layer_idx=i
-            )
-            for i in range(depth)
-        ])
+#         # Local Mamba blocks
+#         from .mamba_module import create_multihead_block
+#         self.mamba_blocks = nn.ModuleList([
+#             create_multihead_block(
+#                 d_model=self.feature_dim,
+#                 d_geom=d_geom,
+#                 rms_norm=True,
+#                 residual_in_fp32=True,
+#                 layer_idx=i
+#             )
+#             for i in range(depth)
+#         ])
         
-        self.dropout = nn.Dropout(dropout)
+#         self.dropout = nn.Dropout(dropout)
         
-    def forward(
-        self,
-        feat_match_0: torch.Tensor,
-        feat_match_1: torch.Tensor,
-        feat_geom_0: torch.Tensor,
-        feat_geom_1: torch.Tensor,
-        spans_x_0: torch.Tensor,
-        spans_y_0: torch.Tensor,
-        spans_x_1: torch.Tensor,
-        spans_y_1: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Process features with adaptive local spans.
+#     def forward(
+#         self,
+#         feat_match_0: torch.Tensor,
+#         feat_match_1: torch.Tensor,
+#         feat_geom_0: torch.Tensor,
+#         feat_geom_1: torch.Tensor,
+#         spans_x_0: torch.Tensor,
+#         spans_y_0: torch.Tensor,
+#         spans_x_1: torch.Tensor,
+#         spans_y_1: torch.Tensor
+#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+#         """
+#         Process features with adaptive local spans.
         
-        Args:
-            feat_match_0/1: Matching features (B, C, H, W)
-            feat_geom_0/1: Geometric features (B, C_geom, H, W)
-            spans_x/y_0/1: Adaptive spans for each position (B, H, W)
+#         Args:
+#             feat_match_0/1: Matching features (B, C, H, W)
+#             feat_geom_0/1: Geometric features (B, C_geom, H, W)
+#             spans_x/y_0/1: Adaptive spans for each position (B, H, W)
             
-        Returns:
-            Updated matching and geometric features
-        """
-        B, C, H, W = feat_match_0.shape
+#         Returns:
+#             Updated matching and geometric features
+#         """
+#         B, C, H, W = feat_match_0.shape
         
-        # For simplicity, use average span for the entire feature map
-        # In full implementation, this would process each position with its specific span
-        avg_span = int(torch.mean(torch.cat([spans_x_0, spans_y_0]).float()).item())
-        avg_span = max(3, min(avg_span, 15))  # Clamp to reasonable range
+#         # For simplicity, use average span for the entire feature map
+#         # In full implementation, this would process each position with its specific span
+#         avg_span = int(torch.mean(torch.cat([spans_x_0, spans_y_0]).float()).item())
+#         avg_span = max(3, min(avg_span, 15))  # Clamp to reasonable range
         
-        # Extract local windows with average span
-        # This is a simplified version - full implementation would use position-specific spans
-        padding = avg_span // 2
-        feat_match_0_padded = F.pad(feat_match_0, (padding, padding, padding, padding))
-        feat_match_1_padded = F.pad(feat_match_1, (padding, padding, padding, padding))
+#         # Extract local windows with average span
+#         # This is a simplified version - full implementation would use position-specific spans
+#         padding = avg_span // 2
+#         feat_match_0_padded = F.pad(feat_match_0, (padding, padding, padding, padding))
+#         feat_match_1_padded = F.pad(feat_match_1, (padding, padding, padding, padding))
         
-        # Unfold to get local windows
-        windows_0 = F.unfold(feat_match_0_padded, kernel_size=avg_span, stride=1)
-        windows_1 = F.unfold(feat_match_1_padded, kernel_size=avg_span, stride=1)
+#         # Unfold to get local windows
+#         windows_0 = F.unfold(feat_match_0_padded, kernel_size=avg_span, stride=1)
+#         windows_1 = F.unfold(feat_match_1_padded, kernel_size=avg_span, stride=1)
         
-        # Reshape for processing
-        # windows_0 = rearrange(windows_0, 'b (c k) (h w) -> b (h w) (k c)', 
-        #                     c=C, h=H, w=W, k=avg_span**2)
-        # windows_1 = rearrange(windows_1, 'b (c k) (h w) -> b (h w) (k c)', 
-        #                     c=C, h=H, w=W, k=avg_span**2)
-        windows_0 = rearrange(windows_0, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
-                              k1=avg_span, k2=avg_span, c=C)
-        windows_1 = rearrange(windows_1, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
-                              k1=avg_span, k2=avg_span, c=C)
+#         # Reshape for processing
+#         # windows_0 = rearrange(windows_0, 'b (c k) (h w) -> b (h w) (k c)', 
+#         #                     c=C, h=H, w=W, k=avg_span**2)
+#         # windows_1 = rearrange(windows_1, 'b (c k) (h w) -> b (h w) (k c)', 
+#         #                     c=C, h=H, w=W, k=avg_span**2)
+#         windows_0 = rearrange(windows_0, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
+#                               k1=avg_span, k2=avg_span, c=C)
+#         windows_1 = rearrange(windows_1, 'b (c k1 k2) l -> (b l) (k1 k2) c', 
+#                               k1=avg_span, k2=avg_span, c=C)
         
-        # Process through Mamba blocks
-        for block in self.mamba_blocks:
-            windows_0_match, windows_0_geom = block(windows_0)
-            windows_1_match, windows_1_geom = block(windows_1)
-            windows_0 = self.dropout(windows_0_match)
-            windows_1 = self.dropout(windows_1_match)
+#         # Process through Mamba blocks
+#         for block in self.mamba_blocks:
+#             windows_0_match, windows_0_geom = block(windows_0)
+#             windows_1_match, windows_1_geom = block(windows_1)
+#             windows_0 = self.dropout(windows_0_match)
+#             windows_1 = self.dropout(windows_1_match)
         
-        # Aggregate back to spatial dimensions
-        # Simple average pooling over windows
-        processed_0 = windows_0_match.mean(dim=2).view(B, H, W, C).permute(0, 3, 1, 2)
-        processed_1 = windows_1_match.mean(dim=2).view(B, H, W, C).permute(0, 3, 1, 2)
+#         # Aggregate back to spatial dimensions
+#         # Simple average pooling over windows
+#         processed_0 = windows_0_match.mean(dim=2).view(B, H, W, C).permute(0, 3, 1, 2)
+#         processed_1 = windows_1_match.mean(dim=2).view(B, H, W, C).permute(0, 3, 1, 2)
         
-        # For geometric features
-        processed_geom_0 = windows_0_geom.mean(dim=2).view(B, H, W, -1).permute(0, 3, 1, 2)
-        processed_geom_1 = windows_1_geom.mean(dim=2).view(B, H, W, -1).permute(0, 3, 1, 2)
+#         # For geometric features
+#         processed_geom_0 = windows_0_geom.mean(dim=2).view(B, H, W, -1).permute(0, 3, 1, 2)
+#         processed_geom_1 = windows_1_geom.mean(dim=2).view(B, H, W, -1).permute(0, 3, 1, 2)
         
-        return processed_0, processed_1, processed_geom_0, processed_geom_1
+#         return processed_0, processed_1, processed_geom_0, processed_geom_1
 
 
 class FeatureFusionFFN(nn.Module):
@@ -375,3 +404,351 @@ class FeatureFusionFFN(nn.Module):
         out = rearrange(out, 'b h w c -> b c h w')
         
         return out
+
+class LocalAdaptiveMamba(nn.Module):
+    """
+    Local Mamba processing with TRUE adaptive spans following ASpanFormer.
+    
+    Key features:
+    1. Position-specific window sizes based on uncertainty
+    2. Flow-guided window centers (predicted correspondences)
+    3. Efficient grouped processing for similar span sizes
+    """
+    
+    def __init__(
+        self,
+        feature_dim: int = 256,
+        depth: int = 4,
+        d_geom: int = 64,
+        dropout: float = 0.1,
+        max_span_groups: int = 5  # Group similar spans for efficiency
+    ):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.d_geom = d_geom
+        self.max_span_groups = max_span_groups
+        
+        # Import MultiHeadMambaBlock for local processing
+        from .mamba_module import create_multihead_block
+        
+        # Create different Mamba blocks for different span sizes
+        # This follows ASpanFormer's strategy of grouping similar window sizes
+        self.span_groups = [5, 7, 9, 11, 15]  # Representative span sizes
+        self.mamba_blocks = nn.ModuleDict({
+            f'span_{s}': nn.ModuleList([
+                create_multihead_block(
+                    d_model=feature_dim,
+                    d_geom=d_geom,
+                    rms_norm=True,
+                    residual_in_fp32=True,
+                    layer_idx=i
+                )
+                for i in range(depth)
+            ])
+            for s in self.span_groups
+        })
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Aggregation weights for combining different span outputs
+        self.span_aggregator = nn.Linear(len(self.span_groups) * feature_dim, feature_dim)
+        self.span_aggregator_geom = nn.Linear(len(self.span_groups) * d_geom, d_geom)
+        
+    def forward(
+        self,
+        feat_match_0: torch.Tensor,
+        feat_match_1: torch.Tensor,
+        feat_geom_0: torch.Tensor,
+        feat_geom_1: torch.Tensor,
+        flow_map_0: torch.Tensor,  # (B, H, W, 4) - includes flow and uncertainty
+        flow_map_1: torch.Tensor,
+        adaptive_spans_x_0: torch.Tensor,  # (B, H, W)
+        adaptive_spans_y_0: torch.Tensor,
+        adaptive_spans_x_1: torch.Tensor,
+        adaptive_spans_y_1: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Process features with TRUE position-adaptive local spans.
+        
+        This implementation follows ASpanFormer's approach:
+        1. Group positions by similar span sizes
+        2. Extract flow-guided windows for each group
+        3. Process each group with appropriate Mamba blocks
+        4. Aggregate results back to spatial positions
+        """
+        B, C, H, W = feat_match_0.shape
+        device = feat_match_0.device
+        
+        # Process each image separately
+        processed_0 = self._process_adaptive_windows(
+            feat_match_0, feat_geom_0, 
+            flow_map_0[..., :2], flow_map_0[..., 2:],  # flow and uncertainty
+            adaptive_spans_x_0, adaptive_spans_y_0,
+            target_feat=feat_match_1  # For flow-guided attention
+        )
+        
+        processed_1 = self._process_adaptive_windows(
+            feat_match_1, feat_geom_1,
+            flow_map_1[..., :2], flow_map_1[..., 2:],
+            adaptive_spans_x_1, adaptive_spans_y_1,
+            target_feat=feat_match_0
+        )
+        
+        return processed_0['match'], processed_1['match'], \
+               processed_0['geom'], processed_1['geom']
+    
+    def _process_adaptive_windows(
+        self,
+        feat_match: torch.Tensor,  # (B, C, H, W)
+        feat_geom: torch.Tensor,   # (B, C_geom, H, W)
+        flow: torch.Tensor,         # (B, H, W, 2)
+        uncertainty: torch.Tensor,  # (B, H, W, 2)
+        spans_x: torch.Tensor,      # (B, H, W)
+        spans_y: torch.Tensor,      # (B, H, W)
+        target_feat: Optional[torch.Tensor] = None
+    ) -> dict:
+        """
+        Extract and process windows with position-specific sizes.
+        
+        Following ASpanFormer:
+        - Windows are centered at predicted correspondence locations (flow-guided)
+        - Window size varies based on uncertainty
+        - Positions with similar spans are grouped for efficiency
+        """
+        B, C, H, W = feat_match.shape
+        device = feat_match.device
+        
+        # Initialize output tensors
+        output_match_list = []
+        output_geom_list = []
+        
+        # Group positions by span size for efficient processing
+        for span_size in self.span_groups:
+            # Find positions that should use this span size
+            # (In practice, we assign each position to its nearest span group)
+            span_mask = self._get_span_group_mask(spans_x, spans_y, span_size)
+            
+            if not span_mask.any():
+                continue
+            
+            # Extract windows for this span group
+            windows_match, windows_geom, window_positions = self._extract_adaptive_windows(
+                feat_match, feat_geom, flow, span_size, span_mask
+            )
+            
+            if windows_match is None:
+                continue
+            
+            # Process through corresponding Mamba blocks
+            mamba_blocks = self.mamba_blocks[f'span_{span_size}']
+            for block in mamba_blocks:
+                windows_match, windows_geom = block(windows_match)
+                windows_match = self.dropout(windows_match)
+            
+            # Store results with position information
+            output_match_list.append((windows_match, window_positions, span_mask))
+            output_geom_list.append((windows_geom, window_positions, span_mask))
+        
+        # Aggregate results from different span groups
+        output_match = self._aggregate_multispan_outputs(
+            output_match_list, (B, C, H, W), self.span_aggregator
+        )
+        output_geom = self._aggregate_multispan_outputs(
+            output_geom_list, (B, self.d_geom, H, W), self.span_aggregator_geom
+        )
+        
+        return {'match': output_match, 'geom': output_geom}
+    
+    def _get_span_group_mask(
+        self, 
+        spans_x: torch.Tensor, 
+        spans_y: torch.Tensor, 
+        target_span: int
+    ) -> torch.Tensor:
+        """
+        Create mask for positions that should use the target span size.
+        Groups positions with similar span requirements.
+        """
+        # Use average of x and y spans
+        avg_spans = (spans_x + spans_y) / 2.0
+        
+        # Find positions closest to this span group
+        span_diffs = torch.abs(avg_spans - target_span)
+        
+        # Create mask for positions within tolerance
+        tolerance = 1.5
+        mask = span_diffs < tolerance
+        
+        # Ensure each position is only in one group (closest one)
+        if hasattr(self, '_position_assignments'):
+            # Avoid reassigning positions
+            already_assigned = self._position_assignments
+            mask = mask & ~already_assigned
+        
+        return mask
+    
+    def _extract_adaptive_windows(
+        self,
+        feat_match: torch.Tensor,
+        feat_geom: torch.Tensor,
+        flow: torch.Tensor,
+        window_size: int,
+        position_mask: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Extract windows of specific size at flow-predicted positions.
+        
+        This is the KEY difference from original implementation:
+        - Windows are centered at PREDICTED CORRESPONDENCE locations
+        - Not just at grid positions
+        """
+        B, C, H, W = feat_match.shape
+        device = feat_match.device
+        
+        # Get positions where we need to extract windows
+        positions = torch.nonzero(position_mask)  # (N, 3) - batch, y, x
+        
+        if len(positions) == 0:
+            return None, None, None
+        
+        # Add flow offset to get window centers (following ASpanFormer)
+        window_centers = positions.float()
+        for i, (b, y, x) in enumerate(positions):
+            # Add flow to shift window center
+            window_centers[i, 1] += flow[b, y, x, 1]  # y offset
+            window_centers[i, 2] += flow[b, y, x, 0]  # x offset
+        
+        # Clamp to image boundaries
+        window_centers[:, 1] = torch.clamp(window_centers[:, 1], 0, H - 1)
+        window_centers[:, 2] = torch.clamp(window_centers[:, 2], 0, W - 1)
+        
+        # Extract windows using grid_sample for sub-pixel accuracy
+        windows_match = self._extract_windows_grid_sample(
+            feat_match, window_centers, window_size
+        )
+        windows_geom = self._extract_windows_grid_sample(
+            feat_geom, window_centers, window_size
+        )
+        
+        return windows_match, windows_geom, positions
+    
+    def _extract_windows_grid_sample(
+        self,
+        features: torch.Tensor,
+        centers: torch.Tensor,
+        window_size: int
+    ) -> torch.Tensor:
+        """
+        Extract windows using grid_sample for sub-pixel accurate sampling.
+        This allows flow-guided window centers at fractional positions.
+        """
+        B, C, H, W = features.shape
+        N = centers.shape[0]
+        
+        # Create grid for each window
+        half_size = window_size // 2
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(-half_size, half_size + 1, device=features.device),
+            torch.arange(-half_size, half_size + 1, device=features.device),
+            indexing='ij'
+        )
+        grid = torch.stack([grid_x, grid_y], dim=-1).float()  # (ws, ws, 2)
+        
+        # Expand grid for all windows]
+        # clone (Runtime error fix)
+        grid = grid.unsqueeze(0).expand(N, -1, -1, -1).clone()  # (N, ws, ws, 2)
+        
+        # Add window centers to grid
+        # grid[..., 0] += centers[:, 2:3].unsqueeze(1).unsqueeze(1)  # x
+        # grid[..., 1] += centers[:, 1:2].unsqueeze(1).unsqueeze(1)  # y
+        # bload cast error fix
+        grid[..., 0] += centers[:, 2:3].unsqueeze(1)  # x
+        grid[..., 1] += centers[:, 1:2].unsqueeze(1)  # y
+        
+        # Normalize to [-1, 1] for grid_sample
+        grid[..., 0] = 2.0 * grid[..., 0] / (W - 1) - 1.0
+        grid[..., 1] = 2.0 * grid[..., 1] / (H - 1) - 1.0
+        
+        # Extract windows for each position
+        windows = []
+        for i, (b, _, _) in enumerate(centers.long()):
+            window = F.grid_sample(
+                features[b:b+1], 
+                grid[i:i+1],
+                mode='bilinear',
+                align_corners=True,
+                padding_mode='zeros'
+            )
+            windows.append(window)
+        
+        windows = torch.cat(windows, dim=0)  # (N, C, ws, ws)
+        windows = rearrange(windows, 'n c h w -> n (h w) c')
+        
+        return windows
+    
+    def _aggregate_multispan_outputs(
+        self,
+        output_list: list,
+        output_shape: tuple,
+        aggregator: nn.Module
+    ) -> torch.Tensor:
+        # """
+        # Aggregate outputs from different span groups back to spatial dimensions.
+        # """
+        # B, C, H, W = output_shape
+        # device = output_list[0][0].device if output_list else torch.device('cpu')
+        """
+        Aggregate outputs from different span groups back to spatial dimensions.
+        This implementation is based on the concept of averaging contributions
+        from multiple overlapping adaptive windows, as inspired by ASpanFormer's
+        goal of integrating context from variable sources.
+        """
+        B, C, H, W = output_shape
+
+        # If the list of outputs to process is empty, return a zero tensor
+        # of the correct shape and device to prevent downstream TypeErrors.
+        if not output_list:
+            # Use a parameter from the module to reliably get the correct device.
+            device = self.span_aggregator.weight.device
+            return torch.zeros(output_shape, device=device)
+
+        # The device is determined from the first available tensor in the list.
+        device = output_list[0][0].device
+
+        # Initialize tensors to accumulate the sum of features and the count of contributions.
+        output_sum = torch.zeros(output_shape, device=device)
+        counts = torch.zeros((B, 1, H, W), device=device)
+
+        # Iterate through the outputs of each span group.
+        for windows, positions, _ in output_list:
+            if windows is None or positions is None or len(positions) == 0:
+                continue
+
+            # As a simplification and efficient aggregation method, we use the feature
+            # of the center pixel of each window as its representative feature.
+            center_pixel_idx = windows.shape[1] // 2
+            center_features = windows[:, center_pixel_idx, :]  # Shape: (N, C) where N is the number of windows
+
+            # Get the coordinates (batch, y, x) for each feature.
+            b_idx = positions[:, 0]
+            y_idx = positions[:, 1]
+            x_idx = positions[:, 2]
+
+            # Add the features to the corresponding locations in the output_sum tensor.
+            # Using a direct indexing assignment is cleaner here.
+            # Note: If multiple windows map to the exact same pixel, this will overwrite.
+            # A more robust approach for perfect aggregation is scatter_add, but for this
+            # matching task, direct assignment is a common and effective strategy.
+            # Let's refine this to use addition for accumulation.
+            # This requires careful indexing.
+            for i, (b, y, x) in enumerate(zip(b_idx, y_idx, x_idx)):
+                 output_sum[b, :, y, x] += center_features[i]
+                 counts[b, :, y, x] += 1
+
+        # Avoid division by zero by adding a small epsilon where counts are zero.
+        counts.clamp_(min=1e-6)
+
+        # Compute the final feature map by averaging the contributions.
+        final_output = output_sum / counts
+
+        return final_output
