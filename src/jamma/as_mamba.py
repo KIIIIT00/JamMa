@@ -109,7 +109,18 @@ class AS_Mamba(nn.Module):
         # desc1 = self.coarse_adapter(desc1)
 
         # desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
-        desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
+        # desc0, desc1 = data['feat_8_0'].flatten(2, 3), data['feat_8_1'].flatten(2, 3)
+        
+        desc0, desc1 = data['feat_8_0'], data['feat_8_1']
+        
+        # FIXED: Apply feature projection if dimension mismatch
+        if desc0.shape[1] != self.d_model_c:
+            desc0 = self.coarse_adapter(desc0)
+            desc1 = self.coarse_adapter(desc1)
+        
+        # Flatten spatial dimensions
+        desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
+        
         kpts0, kpts1 = data['grid_8'], data['grid_8']
         
         # Keypoint normalization
@@ -131,13 +142,42 @@ class AS_Mamba(nn.Module):
             self.mamba_initializer(data)
             # Now data contains both feat_8_0/1 (matching) and feat_geom_0/1 (geometry)
 
-        with self.profiler.profile("as-mamba blocks"):
-            # Iterative refinement through AS-Mamba blocks
-            for block_idx, as_block in enumerate(self.as_mamba_blocks):
-                with self.profiler.profile(f"as-mamba block {block_idx}"):
-                    data = as_block(data)
-                    # Each block updates feat_8_0/1, feat_geom_0/1, and adds flow_map
+        # with self.profiler.profile("as-mamba blocks"):
+        #     # Iterative refinement through AS-Mamba blocks
+        #     for block_idx, as_block in enumerate(self.as_mamba_blocks):
+        #         with self.profiler.profile(f"as-mamba block {block_idx}"):
+        #             data = as_block(data)
+        #             # Each block updates feat_8_0/1, feat_geom_0/1, and adds flow_map
 
+        # FIXED: Collect flow predictions from all blocks
+        flow_predictions = []
+        
+        # Iterative refinement through AS-Mamba blocks
+        for block_idx, as_block in enumerate(self.as_mamba_blocks):
+            with self.profiler.profile(f"as-mamba block {block_idx}"):
+                data = as_block(data)
+                
+                # FIXED: Properly collect and store flow predictions
+                if 'flow_map' in data:
+                    flow_map = data['flow_map']  # (2B, H, W, 4)
+                    bs = data['bs']
+                    
+                    # Split into 0→1 and 1→0
+                    flow_0to1 = flow_map[:bs]
+                    flow_1to0 = flow_map[bs:]
+                    
+                    # Store with block dimension
+                    flow_predictions.append((
+                        flow_0to1.unsqueeze(0),  # (1, B, H, W, 4)
+                        flow_1to0.unsqueeze(0)
+                    ))
+        
+        # FIXED: Stack all flow predictions for loss computation
+        if flow_predictions:
+            flows_0to1 = torch.cat([f[0] for f in flow_predictions], dim=0)  # (N_blocks, B, H, W, 4)
+            flows_1to0 = torch.cat([f[1] for f in flow_predictions], dim=0)
+            data['predict_flow'] = [(flows_0to1, flows_1to0)]
+        
         # Prepare for matching
         mask_c0 = mask_c1 = None
         if 'mask0' in data:
@@ -252,8 +292,12 @@ class AS_Mamba(nn.Module):
         
         # Store AS-Mamba specific outputs for analysis
         if mode in ['val', 'test'] and 'flow_map' in data:
-            # Keep flow predictions for visualization
-            data['as_mamba_flow'] = data.get('flow_map')
-            data['as_mamba_spans'] = data.get('adaptive_spans')
+            # # Keep flow predictions for visualization
+            # data['as_mamba_flow'] = data.get('flow_map')
+            # data['as_mamba_spans'] = data.get('adaptive_spans')
+            if 'flow_map' in data:
+                data['as_mamba_flow'] = data['flow_map']
+            if 'adaptive_spans' in data:
+                data['as_mamba_spans'] = data['adaptive_spans']
         
         return data
