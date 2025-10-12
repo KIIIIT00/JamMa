@@ -229,4 +229,261 @@ def spvs_fine(data, config):
 
     data.update({"conf_matrix_f_gt": conf_matrix_f_gt})
 
+def compute_supervision_flow(data, config):
+    """
+    Compute ground truth flow for AS-Mamba supervision.
+    
+    This is CRITICAL for AS-Mamba's adaptive span mechanism.
+    Flow supervision enables the model to learn:
+    1. Accurate correspondence prediction
+    2. Uncertainty estimation
+    3. Adaptive window size selection
+    
+    Args:
+        data: Batch dictionary containing:
+            - conf_matrix_gt: Ground truth correspondence matrix (B, H0*W0, H1*W1)
+            - hw0_c, hw1_c: Coarse feature map dimensions
+        config: Configuration dictionary
+    
+    Updates data with:
+        - flow_gt_0to1: Ground truth flow from image 0 to 1 (B, H0, W0, 2)
+        - flow_gt_1to0: Ground truth flow from image 1 to 0 (B, H1, W1, 2)
+        - spv_b_ids, spv_i_ids, spv_j_ids: Supervision indices for sparse supervision
+    """
+    
+    # Extract dimensions
+    bs = data['conf_matrix_gt'].shape[0]
+    h0, w0 = data['hw0_c']
+    h1, w1 = data['hw1_c']
+    
+    device = data['conf_matrix_gt'].device
+    
+    # Get ground truth correspondences
+    conf_gt = data['conf_matrix_gt']  # (B, H0*W0, H1*W1)
+    
+    # Find positive matches for sparse supervision
+    # This gives us the indices where ground truth matches exist
+    spv_b_ids = []  # Batch indices
+    spv_i_ids = []  # Source indices (in image 0)
+    spv_j_ids = []  # Target indices (in image 1)
+    
+    for b in range(bs):
+        pos_indices = torch.nonzero(conf_gt[b] == 1, as_tuple=False)
+        if len(pos_indices) > 0:
+            i_ids = pos_indices[:, 0]  # Source positions
+            j_ids = pos_indices[:, 1]  # Target positions
+            
+            spv_b_ids.append(torch.full((len(i_ids),), b, device=device))
+            spv_i_ids.append(i_ids)
+            spv_j_ids.append(j_ids)
+    
+    # Concatenate all supervision indices
+    if len(spv_b_ids) > 0:
+        spv_b_ids = torch.cat(spv_b_ids, dim=0)
+        spv_i_ids = torch.cat(spv_i_ids, dim=0)
+        spv_j_ids = torch.cat(spv_j_ids, dim=0)
+    else:
+        # No ground truth matches - create dummy supervision
+        spv_b_ids = torch.zeros(1, dtype=torch.long, device=device)
+        spv_i_ids = torch.zeros(1, dtype=torch.long, device=device)
+        spv_j_ids = torch.zeros(1, dtype=torch.long, device=device)
+    
+    # Compute flow ground truth
+    # Flow is the displacement from source position to target position
+    flow_gt_0to1 = torch.zeros(bs, h0, w0, 2, device=device, dtype=torch.float32)
+    flow_gt_1to0 = torch.zeros(bs, h1, w1, 2, device=device, dtype=torch.float32)
+    
+    for idx in range(len(spv_b_ids)):
+        b = spv_b_ids[idx]
+        i = spv_i_ids[idx]
+        j = spv_j_ids[idx]
+        
+        # Convert linear indices to 2D coordinates
+        i_y, i_x = i // w0, i % w0
+        j_y, j_x = j // w1, j % w1
+        
+        # Flow from i to j (0 -> 1)
+        flow_x = j_x.float() - i_x.float()
+        flow_y = j_y.float() - i_y.float()
+        flow_gt_0to1[b, i_y, i_x, 0] = flow_x
+        flow_gt_0to1[b, i_y, i_x, 1] = flow_y
+        
+        # Flow from j to i (1 -> 0)
+        flow_gt_1to0[b, j_y, j_x, 0] = -flow_x
+        flow_gt_1to0[b, j_y, j_x, 1] = -flow_y
+    
+    # Update data dictionary
+    data.update({
+        'flow_gt_0to1': flow_gt_0to1,
+        'flow_gt_1to0': flow_gt_1to0,
+        'spv_b_ids': spv_b_ids,
+        'spv_i_ids': spv_i_ids,
+        'spv_j_ids': spv_j_ids
+    })
+    
+    return data
 
+
+def compute_optimal_spans(flow_magnitude, uncertainty, config):
+    """
+    Compute optimal adaptive spans for analysis/debugging.
+    
+    This can be used to:
+    1. Validate learned span predictions
+    2. Analyze span distribution
+    3. Debug adaptive span mechanism
+    
+    Args:
+        flow_magnitude: Magnitude of flow vectors (B, H, W)
+        uncertainty: Flow uncertainty (B, H, W)
+        config: Configuration
+    
+    Returns:
+        optimal_spans: Recommended span sizes (B, H, W)
+    """
+    base_span = config['asmamba'].get('base_span', 7)
+    max_span = config['asmamba'].get('max_span', 15)
+    min_span = config['asmamba'].get('min_span', 3)
+    
+    # Higher flow magnitude -> larger span needed
+    # Higher uncertainty -> larger span needed (to capture more context)
+    span_adjustment = torch.clamp(
+        flow_magnitude * 0.5 + uncertainty * 2.0,
+        min=0.0,
+        max=float(max_span - base_span)
+    )
+    
+    optimal_spans = torch.clamp(
+        base_span + span_adjustment,
+        min=min_span,
+        max=max_span
+    ).long()
+    
+    return optimal_spans
+
+
+def compute_flow_errors(predicted_flow, gt_flow, mask=None):
+    """
+    Compute flow prediction errors for analysis.
+    
+    Args:
+        predicted_flow: Predicted flow (B, H, W, 4) with [dx, dy, ux, uy]
+        gt_flow: Ground truth flow (B, H, W, 2)
+        mask: Valid region mask (B, H, W)
+    
+    Returns:
+        Dictionary with error statistics
+    """
+    # Extract predicted flow (first 2 channels)
+    pred_flow_xy = predicted_flow[..., :2]
+    
+    # Compute endpoint error (EPE)
+    epe = torch.sqrt(((pred_flow_xy - gt_flow) ** 2).sum(-1))
+    
+    if mask is not None:
+        epe = epe[mask]
+    
+    errors = {
+        'mean_epe': epe.mean().item(),
+        'median_epe': epe.median().item(),
+        'max_epe': epe.max().item(),
+        '1px_accuracy': (epe < 1.0).float().mean().item(),
+        '3px_accuracy': (epe < 3.0).float().mean().item(),
+    }
+    
+    return errors
+
+
+def compute_adaptive_span_statistics(spans_x, spans_y):
+    """
+    Compute statistics about adaptive span distribution.
+    
+    Useful for:
+    1. Monitoring span learning progress
+    2. Identifying problematic regions
+    3. Validating span diversity
+    
+    Args:
+        spans_x, spans_y: Adaptive spans (B, H, W)
+    
+    Returns:
+        Dictionary with span statistics
+    """
+    stats = {
+        'mean_span_x': spans_x.float().mean().item(),
+        'mean_span_y': spans_y.float().mean().item(),
+        'std_span_x': spans_x.float().std().item(),
+        'std_span_y': spans_y.float().std().item(),
+        'min_span': min(spans_x.min().item(), spans_y.min().item()),
+        'max_span': max(spans_x.max().item(), spans_y.max().item()),
+        'span_entropy': compute_entropy(torch.cat([spans_x.flatten(), spans_y.flatten()])),
+    }
+    
+    return stats
+
+
+def compute_entropy(values):
+    """Compute entropy of discrete values (measure of diversity)."""
+    unique, counts = torch.unique(values, return_counts=True)
+    probs = counts.float() / counts.sum()
+    entropy = -(probs * torch.log(probs + 1e-10)).sum()
+    return entropy.item()
+
+
+def verify_flow_consistency(flow_0to1, flow_1to0, threshold=2.0):
+    """
+    Verify bidirectional flow consistency.
+    
+    For valid flows: flow_0to1(x) + flow_1to0(x + flow_0to1(x)) ≈ 0
+    
+    This can identify:
+    1. Occlusions
+    2. Prediction errors
+    3. Non-rigid motion
+    
+    Args:
+        flow_0to1: Flow from image 0 to 1 (B, H, W, 2)
+        flow_1to0: Flow from image 1 to 0 (B, H, W, 2)
+        threshold: Consistency threshold in pixels
+    
+    Returns:
+        consistency_mask: Boolean mask of consistent flows
+        consistency_error: Magnitude of inconsistency
+    """
+    B, H, W, _ = flow_0to1.shape
+    device = flow_0to1.device
+    
+    # Create coordinate grid
+    y_coords, x_coords = torch.meshgrid(
+        torch.arange(H, device=device),
+        torch.arange(W, device=device),
+        indexing='ij'
+    )
+    coords = torch.stack([x_coords, y_coords], dim=-1).float()  # (H, W, 2)
+    coords = coords.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
+    
+    # Warp coordinates by flow_0to1
+    warped_coords = coords + flow_0to1
+    
+    # Sample flow_1to0 at warped locations
+    # Normalize coordinates to [-1, 1] for grid_sample
+    warped_coords_norm = warped_coords.clone()
+    warped_coords_norm[..., 0] = 2.0 * warped_coords_norm[..., 0] / (W - 1) - 1.0
+    warped_coords_norm[..., 1] = 2.0 * warped_coords_norm[..., 1] / (H - 1) - 1.0
+    
+    # Reshape for grid_sample
+    flow_1to0_perm = flow_1to0.permute(0, 3, 1, 2)  # (B, 2, H, W)
+    warped_flow = F.grid_sample(
+        flow_1to0_perm,
+        warped_coords_norm,
+        mode='bilinear',
+        padding_mode='zeros',
+        align_corners=True
+    )
+    warped_flow = warped_flow.permute(0, 2, 3, 1)  # (B, H, W, 2)
+    
+    # Compute consistency error
+    consistency_error = torch.sqrt(((flow_0to1 + warped_flow) ** 2).sum(-1))
+    consistency_mask = consistency_error < threshold
+    
+    return consistency_mask, consistency_error
