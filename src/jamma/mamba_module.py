@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import math
-from typing import Tuple
+from typing import Tuple, Optional
 from src.jamma.utils.utils import GLU_3
 from mamba_ssm import Mamba
 from functools import partial
@@ -373,35 +373,145 @@ class JointMamba(nn.Module):
             'feat_8_1': desc1,
         })
 
+# class MultiHeadMambaBlock(nn.Module):
+#     """
+#     Multi-Head Mamba Block for AS-Mamba architecture.
+    
+#     This block extends the standard Mamba block by splitting the output into
+#     two heads: matching head and geometry head. This allows the model to
+#     learn both appearance matching features and geometric transformation features
+#     simultaneously.
+    
+#     Args:
+#         dim (int): Input/output dimension for the matching head
+#         d_geom (int, optional): Output dimension for the geometry head. 
+#                                Defaults to dim // 2
+#         mixer_cls: Mamba mixer class (typically partial(Mamba, ...))
+#         norm_cls: Normalization class (LayerNorm or RMSNorm)
+#         fused_add_norm (bool): Whether to use fused add+norm operation
+#         residual_in_fp32 (bool): Whether to use fp32 for residual connection
+#         drop_path (float): Drop path rate for regularization
+#     """
+    
+#     def __init__(
+#             self, 
+#             dim: int, 
+#             d_geom: int = None,
+#             mixer_cls=None, 
+#             norm_cls=nn.LayerNorm, 
+#             fused_add_norm: bool = False, 
+#             residual_in_fp32: bool = False,
+#             drop_path: float = 0.,
+#     ):
+#         super().__init__()
+#         self.dim = dim
+#         self.d_geom = d_geom if d_geom is not None else dim // 2
+#         self.residual_in_fp32 = residual_in_fp32
+#         self.fused_add_norm = fused_add_norm
+        
+#         # Core Mamba mixer for sequence modeling
+#         if mixer_cls is None:
+#             mixer_cls = partial(Mamba, d_model=dim)
+#         self.mixer = mixer_cls(dim)
+        
+#         # Normalization layer
+#         self.norm = norm_cls(dim)
+        
+#         # Output projection heads
+#         # Matching head: preserves full dimension for detailed matching features
+#         self.out_proj_match = nn.Linear(dim, dim)
+        
+#         # Geometry head: projects to lower dimension for geometric features
+#         self.out_proj_geom = nn.Linear(dim, self.d_geom)
+        
+#         # Optional: Layer normalization for each head output
+#         self.norm_match = nn.LayerNorm(dim)
+#         self.norm_geom = nn.LayerNorm(self.d_geom)
+        
+#         # Drop path for regularization (if specified)
+#         self.drop_path = nn.Identity() if drop_path == 0. else nn.Dropout(drop_path)
+        
+#         # Ensure RMSNorm is available if fused_add_norm is requested
+#         if self.fused_add_norm:
+#             assert RMSNorm is not None, "RMSNorm import fails"
+#             assert isinstance(
+#                 self.norm, (nn.LayerNorm, RMSNorm)
+#             ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
+
+#     def forward(
+#             self, 
+#             x: torch.Tensor, 
+#             inference_params=None
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         """
+#         Forward pass of the Multi-Head Mamba Block.
+        
+#         Args:
+#             x (torch.Tensor): Input tensor of shape (B, L, D)
+#                             B = batch size, L = sequence length, D = dimension
+#             inference_params: Optional parameters for inference mode
+            
+#         Returns:
+#             y_match (torch.Tensor): Matching head output, shape (B, L, D)
+#             y_geom (torch.Tensor): Geometry head output, shape (B, L, D_geom)
+#         """
+        
+#         # Store residual connection for matching head
+#         residual = x
+        
+#         # Apply normalization to input
+#         hidden_states = self.norm(x.to(dtype=self.norm.weight.dtype))
+        
+#         # Convert residual to fp32 if specified (for numerical stability)
+#         if self.residual_in_fp32:
+#             residual = residual.to(torch.float32)
+        
+#         # Process through Mamba mixer
+#         # The mixer learns long-range dependencies in the sequence
+#         hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+        
+#         # Apply drop path regularization
+#         hidden_states = self.drop_path(hidden_states)
+        
+#         # Split into two heads with different projections
+#         # Matching head: focuses on appearance and texture features
+#         y_match_pre = self.out_proj_match(hidden_states)
+#         y_match = residual + y_match_pre  # Residual connection
+#         y_match = self.norm_match(y_match)  # Normalize output
+        
+#         # Geometry head: focuses on spatial transformation and structure
+#         # No residual connection as dimension changes
+#         y_geom = self.out_proj_geom(hidden_states)
+#         y_geom = self.norm_geom(y_geom)  # Normalize output
+        
+#         return y_match, y_geom
+
+#     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+#         """Allocate cache for efficient inference."""
+#         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+
 class MultiHeadMambaBlock(nn.Module):
     """
-    Multi-Head Mamba Block for AS-Mamba architecture.
+    Multi-Head Mamba Block for initial feature splitting.
     
-    This block extends the standard Mamba block by splitting the output into
-    two heads: matching head and geometry head. This allows the model to
-    learn both appearance matching features and geometric transformation features
-    simultaneously.
+    USAGE: JointMambaMultiHead (Global Path)
     
-    Args:
-        dim (int): Input/output dimension for the matching head
-        d_geom (int, optional): Output dimension for the geometry head. 
-                               Defaults to dim // 2
-        mixer_cls: Mamba mixer class (typically partial(Mamba, ...))
-        norm_cls: Normalization class (LayerNorm or RMSNorm)
-        fused_add_norm (bool): Whether to use fused add+norm operation
-        residual_in_fp32 (bool): Whether to use fp32 for residual connection
-        drop_path (float): Drop path rate for regularization
+    Architecture:
+        Input (combined) → Mamba → Split into dual heads → Output (match, geom)
+    
+    This follows JamMa's original design where a single feature is processed
+    and then split into matching and geometric representations.
     """
     
     def __init__(
-            self, 
-            dim: int, 
-            d_geom: int = None,
-            mixer_cls=None, 
-            norm_cls=nn.LayerNorm, 
-            fused_add_norm: bool = False, 
-            residual_in_fp32: bool = False,
-            drop_path: float = 0.,
+        self, 
+        dim: int, 
+        d_geom: int = None,
+        mixer_cls=None, 
+        norm_cls=nn.LayerNorm, 
+        fused_add_norm: bool = False, 
+        residual_in_fp32: bool = False,
+        drop_path: float = 0.,
     ):
         super().__init__()
         self.dim = dim
@@ -409,87 +519,71 @@ class MultiHeadMambaBlock(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         
-        # Core Mamba mixer for sequence modeling
+        # Single Mamba mixer for combined processing
         if mixer_cls is None:
             mixer_cls = partial(Mamba, d_model=dim)
         self.mixer = mixer_cls(dim)
         
-        # Normalization layer
+        # Normalization
         self.norm = norm_cls(dim)
         
-        # Output projection heads
-        # Matching head: preserves full dimension for detailed matching features
+        # Output projection heads (split into dual streams)
         self.out_proj_match = nn.Linear(dim, dim)
-        
-        # Geometry head: projects to lower dimension for geometric features
         self.out_proj_geom = nn.Linear(dim, self.d_geom)
         
-        # Optional: Layer normalization for each head output
+        # Output normalization
         self.norm_match = nn.LayerNorm(dim)
         self.norm_geom = nn.LayerNorm(self.d_geom)
         
-        # Drop path for regularization (if specified)
+        # Regularization
         self.drop_path = nn.Identity() if drop_path == 0. else nn.Dropout(drop_path)
         
-        # Ensure RMSNorm is available if fused_add_norm is requested
         if self.fused_add_norm:
             assert RMSNorm is not None, "RMSNorm import fails"
-            assert isinstance(
-                self.norm, (nn.LayerNorm, RMSNorm)
-            ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
 
     def forward(
-            self, 
-            x: torch.Tensor, 
-            inference_params=None
+        self, 
+        x: torch.Tensor, 
+        inference_params=None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass of the Multi-Head Mamba Block.
+        Forward: Single input → Dual output
         
         Args:
-            x (torch.Tensor): Input tensor of shape (B, L, D)
-                            B = batch size, L = sequence length, D = dimension
-            inference_params: Optional parameters for inference mode
+            x: Input features (B, L, D)
+            inference_params: Optional inference parameters
             
         Returns:
-            y_match (torch.Tensor): Matching head output, shape (B, L, D)
-            y_geom (torch.Tensor): Geometry head output, shape (B, L, D_geom)
+            (y_match, y_geom): Dual-head outputs
         """
-        
-        # Store residual connection for matching head
         residual = x
-        
-        # Apply normalization to input
         hidden_states = self.norm(x.to(dtype=self.norm.weight.dtype))
         
-        # Convert residual to fp32 if specified (for numerical stability)
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
         
-        # Process through Mamba mixer
-        # The mixer learns long-range dependencies in the sequence
-        hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+        # CRITICAL: Move to same device if needed (GPU mode fix)
+        mixer_device = next(self.mixer.parameters()).device
+        if hidden_states.device != mixer_device:
+            hidden_states = hidden_states.to(mixer_device)
+            residual = residual.to(mixer_device)
         
-        # Apply drop path regularization
+        # Process through Mamba
+        hidden_states = self.mixer(hidden_states, inference_params=inference_params)
         hidden_states = self.drop_path(hidden_states)
         
-        # Split into two heads with different projections
-        # Matching head: focuses on appearance and texture features
+        # Split into dual heads
         y_match_pre = self.out_proj_match(hidden_states)
-        y_match = residual + y_match_pre  # Residual connection
-        y_match = self.norm_match(y_match)  # Normalize output
+        y_match = residual + y_match_pre
+        y_match = self.norm_match(y_match)
         
-        # Geometry head: focuses on spatial transformation and structure
-        # No residual connection as dimension changes
         y_geom = self.out_proj_geom(hidden_states)
-        y_geom = self.norm_geom(y_geom)  # Normalize output
+        y_geom = self.norm_geom(y_geom)
         
         return y_match, y_geom
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        """Allocate cache for efficient inference."""
         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
-
 
 def create_multihead_block(
     d_model,
@@ -503,6 +597,7 @@ def create_multihead_block(
     layer_idx=None,
     device=None,
     dtype=None,
+    block_type='single_input', 
 ):
     """
     Factory function to create a Multi-Head Mamba Block.
@@ -510,36 +605,72 @@ def create_multihead_block(
     This follows the same pattern as the original create_block function
     but returns our MultiHeadMambaBlock instead.
     """
+    # if ssm_cfg is None:
+    #     ssm_cfg = {}
+    
+    # factory_kwargs = {"device": device, "dtype": dtype}
+    
+    # # Create Mamba mixer with specified configuration
+    # mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+    
+    # # Select normalization class
+    # norm_cls = partial(
+    #     nn.LayerNorm if not rms_norm else RMSNorm, 
+    #     eps=norm_epsilon, 
+    #     **factory_kwargs
+    # )
+    
+    # # Create the multi-head block
+    # block = MultiHeadMambaBlock(
+    #     dim = d_model,
+    #     d_geom=d_geom,
+    #     mixer_cls=mixer_cls,
+    #     fused_add_norm=fused_add_norm,
+    #     residual_in_fp32=residual_in_fp32,
+    #     drop_path=drop_path,
+    #     rms_norm = rms_norm,
+    #     norm_epsilon = norm_epsilon
+    # )
+    
+    # # Store layer index for debugging/visualization
+    # block.layer_idx = layer_idx
+    
+    # return block
     if ssm_cfg is None:
         ssm_cfg = {}
     
     factory_kwargs = {"device": device, "dtype": dtype}
-    
-    # Create Mamba mixer with specified configuration
     mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
-    
-    # Select normalization class
     norm_cls = partial(
         nn.LayerNorm if not rms_norm else RMSNorm, 
         eps=norm_epsilon, 
         **factory_kwargs
     )
     
-    # Create the multi-head block
-    block = MultiHeadMambaBlock(
-        dim = d_model,
-        d_geom=d_geom,
-        mixer_cls=mixer_cls,
-        fused_add_norm=fused_add_norm,
-        residual_in_fp32=residual_in_fp32,
-        drop_path=drop_path,
-        rms_norm = rms_norm,
-        norm_epsilon = norm_epsilon
-    )
+    if block_type == 'dual_input':
+        # For LocalAdaptiveMamba
+        block = DualStreamMambaBlock(
+            d_model=d_model,
+            d_geom=d_geom or d_model // 2,
+            mixer_cls=mixer_cls,
+            norm_cls=norm_cls,
+            fused_add_norm=fused_add_norm,
+            residual_in_fp32=residual_in_fp32,
+            drop_path=drop_path,
+        )
+    else:
+        # For JointMambaMultiHead (default)
+        block = MultiHeadMambaBlock(
+            dim=d_model,
+            d_geom=d_geom,
+            mixer_cls=mixer_cls,
+            norm_cls=norm_cls,
+            fused_add_norm=fused_add_norm,
+            residual_in_fp32=residual_in_fp32,
+            drop_path=drop_path,
+        )
     
-    # Store layer index for debugging/visualization
     block.layer_idx = layer_idx
-    
     return block
 
 """
@@ -629,44 +760,179 @@ class MultiHeadMambaBlock(nn.Module):
         return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
 
-def create_multihead_block(
-    d_model,
-    d_geom=None,
-    ssm_cfg=None,
-    norm_epsilon=1e-5,
-    drop_path=0.,
-    rms_norm=False,
-    residual_in_fp32=False,
-    fused_add_norm=False,
-    layer_idx=None,
-    device=None,
-    dtype=None,
-):
-    """Factory function to create a Multi-Head Mamba Block."""
-    if ssm_cfg is None:
-        ssm_cfg = {}
+# def create_multihead_block(
+#     d_model,
+#     d_geom=None,
+#     ssm_cfg=None,
+#     norm_epsilon=1e-5,
+#     drop_path=0.,
+#     rms_norm=False,
+#     residual_in_fp32=False,
+#     fused_add_norm=False,
+#     layer_idx=None,
+#     device=None,
+#     dtype=None,
+
+# ):
+#     """Factory function to create a Multi-Head Mamba Block."""
+#     if ssm_cfg is None:
+#         ssm_cfg = {}
     
-    factory_kwargs = {"device": device, "dtype": dtype}
-    mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
-    norm_cls = partial(
-        nn.LayerNorm if not rms_norm else RMSNorm, 
-        eps=norm_epsilon, 
-        **factory_kwargs
-    )
+#     factory_kwargs = {"device": device, "dtype": dtype}
+#     mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+#     norm_cls = partial(
+#         nn.LayerNorm if not rms_norm else RMSNorm, 
+#         eps=norm_epsilon, 
+#         **factory_kwargs
+#     )
     
-    block = MultiHeadMambaBlock(
-        d_model,
-        d_geom=d_geom,
-        mixer_cls=mixer_cls,
-        norm_cls=norm_cls,
-        fused_add_norm=fused_add_norm,
-        residual_in_fp32=residual_in_fp32,
-        drop_path=drop_path,
-    )
-    block.layer_idx = layer_idx
-    return block
+#     block = MultiHeadMambaBlock(
+#         d_model,
+#         d_geom=d_geom,
+#         mixer_cls=mixer_cls,
+#         norm_cls=norm_cls,
+#         fused_add_norm=fused_add_norm,
+#         residual_in_fp32=residual_in_fp32,
+#         drop_path=drop_path,
+#     )
+#     block.layer_idx = layer_idx
+#     return block
 
 
+class DualStreamMambaBlock(nn.Module):
+    """
+    Dual-Stream Mamba Block for independent stream processing.
+    
+    USAGE: LocalAdaptiveMamba (Local Path with Adaptive Spans)
+    
+    Architecture:
+        Input (match, geom) → Process independently → Output (match, geom)
+    
+    DESIGN RATIONALE:
+    -----------------
+    In LocalAdaptiveMamba, features are already separated into matching
+    and geometric streams. Each stream needs independent processing with
+    its own Mamba mixer to maintain stream-specific information.
+    
+    This is different from MultiHeadMambaBlock which CREATES the separation.
+    Here we MAINTAIN the separation through parallel processing.
+    
+    WHY TWO SEPARATE MIXERS:
+    ------------------------
+    1. Different dimensionality: match (256), geom (64)
+    2. Different semantic meaning: appearance vs. structure
+    3. Independent learning dynamics for each modality
+    4. Prevents information leakage between streams
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        d_geom: int = 64,
+        mixer_cls=None,
+        norm_cls=nn.LayerNorm,
+        fused_add_norm: bool = False,
+        residual_in_fp32: bool = False,
+        drop_path: float = 0.,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.d_geom = d_geom
+        self.residual_in_fp32 = residual_in_fp32
+        
+        # CRITICAL: TWO independent Mamba mixers
+        # Matching stream: full dimension
+        if mixer_cls is None:
+            self.mixer_match = Mamba(d_model=d_model)
+        else:
+            # Use provided mixer_cls but override d_model
+            self.mixer_match = Mamba(d_model=d_model)
+        
+        # Geometric stream: lower dimension
+        self.mixer_geom = Mamba(d_model=d_geom)
+        
+        # Independent normalization for each stream
+        self.norm_match = norm_cls(d_model)
+        self.norm_geom = norm_cls(d_geom)
+        
+        # Regularization
+        self.drop_path = nn.Identity() if drop_path == 0. else nn.Dropout(drop_path)
+    
+    def forward(
+        self,
+        hidden_states_match: torch.Tensor,
+        hidden_states_geom: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward: Dual input → Dual output (independent processing)
+        
+        Args:
+            hidden_states_match: Matching features (B, L, D_model)
+            hidden_states_geom: Geometric features (B, L, D_geom) or None
+            
+        Returns:
+            (y_match, y_geom): Independently processed outputs
+        """
+        
+        # ========================================
+        # MATCHING STREAM
+        # ========================================
+        residual_match = hidden_states_match
+        
+        # Normalize
+        x_match = self.norm_match(
+            hidden_states_match.to(dtype=self.norm_match.weight.dtype)
+        )
+        
+        if self.residual_in_fp32:
+            residual_match = residual_match.to(torch.float32)
+        
+        # CRITICAL: Device consistency (GPU mode)
+        mixer_device = next(self.mixer_match.parameters()).device
+        if x_match.device != mixer_device:
+            x_match = x_match.to(mixer_device)
+            residual_match = residual_match.to(mixer_device)
+        
+        # Process through Mamba (matching)
+        y_match = self.mixer_match(x_match, inference_params=None)
+        y_match = self.drop_path(y_match)
+        y_match = residual_match + y_match
+        
+        # ========================================
+        # GEOMETRIC STREAM
+        # ========================================
+        if hidden_states_geom is not None:
+            residual_geom = hidden_states_geom
+            
+            # Normalize
+            x_geom = self.norm_geom(
+                hidden_states_geom.to(dtype=self.norm_geom.weight.dtype)
+            )
+            
+            if self.residual_in_fp32:
+                residual_geom = residual_geom.to(torch.float32)
+            
+            # Device consistency
+            mixer_geom_device = next(self.mixer_geom.parameters()).device
+            if x_geom.device != mixer_geom_device:
+                x_geom = x_geom.to(mixer_geom_device)
+                residual_geom = residual_geom.to(mixer_geom_device)
+            
+            # Process through Mamba (geometric)
+            y_geom = self.mixer_geom(x_geom, inference_params=None)
+            y_geom = self.drop_path(y_geom)
+            y_geom = residual_geom + y_geom
+        else:
+            # Initialize if not provided
+            B, L = hidden_states_match.shape[:2]
+            y_geom = torch.zeros(
+                B, L, self.d_geom,
+                device=hidden_states_match.device,
+                dtype=hidden_states_match.dtype
+            )
+        
+        return y_match, y_geom
+    
 # ============= Standard Block (from original JamMa) =============
 
 class Block(nn.Module):

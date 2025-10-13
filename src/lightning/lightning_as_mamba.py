@@ -386,7 +386,7 @@ from src.jamma.utils.supervision import (
     compute_supervision_fine, 
     compute_supervision_flow
 )
-from src.losses.asmamba_loss import ASMambaLoss
+from src.losses.as_mamba_loss import ASMambaLoss
 
 # Shared utilities
 from src.optimizers import build_optimizer, build_scheduler
