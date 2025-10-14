@@ -970,10 +970,12 @@ class PL_ASMamba(pl.LightningModule):
             logger.info('\n' + pprint.pformat(val_metrics_4tb))
             
             # Runtime statistics
-            n_test_pairs = len(outputs) * batch['imagec_0'].shape[0]
-            avg_runtime = self.total_ms / n_test_pairs if n_test_pairs > 0 else 0
-            logger.info(f'\nAverage matching time: {avg_runtime:.2f} ms per pair')
-            logger.info('=' * 80)
+            # n_test_pairs = len(outputs) * batch['imagec_0'].shape[0]
+            # avg_runtime = self.total_ms / n_test_pairs if n_test_pairs > 0 else 0
+            # logger.info(f'\nAverage matching time: {avg_runtime:.2f} ms per pair')
+            print('Averaged Matching time over 1500 pairs: {:.2f} ms'.format(self.total_ms / 1500))
+            # logger.info('=' * 80)
+            logger.infor('\n' + 'Averaged Matching time over 1500 pairs: {:.2f} ms'.format(self.total_ms / 1500))
             
             # Save results
             if self.dump_dir is not None:
