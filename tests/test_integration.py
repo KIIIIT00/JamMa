@@ -84,7 +84,9 @@ def test_as_mamba_full_forward():
             'coarse': {'d_model': 256},
             'fine': {
                 'd_model': 128,
-                'dsmax_temperature': 0.1
+                'dsmax_temperature': 0.1,
+                'inference': False,
+                'thr': 0.1
             },
             'fine_window_size': 5,
             'resolution': [8, 2],
@@ -367,7 +369,12 @@ def test_multiblock_flow_collection():
         
         config = {
             'coarse': {'d_model': 256},
-            'fine': {'d_model': 64},
+            'fine': {
+                'd_model': 64,
+                'inference': False,
+                'dsmax_temperature': 0.1,
+                'thr': 0.1
+            },
             'fine_window_size': 5,
             'resolution': [8, 2],
             'as_mamba': {
@@ -381,7 +388,11 @@ def test_multiblock_flow_collection():
                 'match_type': 'dual_softmax',
                 'temperature': 0.1,
                 'thr': 0.2,
-                'use_sm': True
+                'use_sm': True,
+                'inference': False,
+                'border_rm': 2,
+                'dsmax_temperature': 0.1,
+
             },
         }
         
