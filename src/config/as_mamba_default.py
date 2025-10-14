@@ -123,6 +123,9 @@ _CN.TRAINER.ELR_GAMMA = 0.999992
 _CN.TRAINER.GRADIENT_CLIPPING = 0.5
 _CN.TRAINER.SEED = 66
 
+# geometric metrics and pose solver
+_CN.TRAINER.EPI_ERR_THR = 1e-4  # recommendation: 5e-4 for ScanNet, 1e-4 for MegaDepth 
+
 # Evaluation
 _CN.TRAINER.N_VAL_PAIRS_TO_PLOT = 32
 _CN.TRAINER.PLOT_MODE = 'evaluation'
