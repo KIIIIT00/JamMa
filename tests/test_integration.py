@@ -133,8 +133,8 @@ def test_as_mamba_full_forward():
             'imagec_1': create_tensor(batch_size, 3, H, W),
             
             # Features at 1/8 resolution (from backbone)
-            'feat_8_0': create_tensor(batch_size, 160, H_c, W_c),  # ConvNeXtV2-nano
-            'feat_8_1': create_tensor(batch_size, 160, H_c, W_c),
+            'feat_8_0': create_tensor(batch_size, 256, H_c, W_c),  # ConvNeXtV2-nano
+            'feat_8_1': create_tensor(batch_size, 256, H_c, W_c),
             
             # Features at 1/4 resolution (for fine matching)
             'feat_4_0': create_tensor(batch_size, 80, H_c * 2, W_c * 2),
@@ -288,6 +288,8 @@ def test_gradient_flow():
     print("-" * 40)
     
     try:
+        torch.autograd.set_detect_anomaly(True)
+        
         from src.jamma.as_mamba_block import AS_Mamba_Block
         
         device = get_device()
@@ -364,8 +366,13 @@ def test_multiblock_flow_collection():
     try:
         from src.jamma.as_mamba import AS_Mamba
         
+        import inspect
+        print(f"AS_Mamba is defined in: {inspect.getfile(AS_Mamba)}")
+        
         device = get_device()
         print(f"Testing on: {device}")
+        
+        n_blocks = 3
         
         config = {
             'coarse': {'d_model': 256},
@@ -378,7 +385,7 @@ def test_multiblock_flow_collection():
             'fine_window_size': 5,
             'resolution': [8, 2],
             'as_mamba': {
-                'n_blocks': 2,  # Reduced for testing
+                'n_blocks': n_blocks,  # Reduced for testing
                 'd_geom': 64,
                 'use_kan_flow': False,
                 'global_depth': 2,
@@ -396,7 +403,7 @@ def test_multiblock_flow_collection():
             },
         }
         
-        print("Creating AS-Mamba with 3 blocks...")
+        print(f"Creating AS-Mamba with {n_blocks} blocks...")
         model = AS_Mamba(config).to(device)
         model.eval()
         

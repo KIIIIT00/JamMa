@@ -41,7 +41,16 @@ class AS_Mamba(nn.Module):
         self.global_depth = config.get('as_mamba', {}).get('global_depth', 4)  # Depth for global Mamba
         self.local_depth = config.get('as_mamba', {}).get('local_depth', 4)    # Depth for local Mamba
         
-        self.coarse_adapter = nn.Conv2d(256, self.d_model_c, kernel_size=1)
+        # debug
+        print(f"[DEBUG] AS_Mamba.__init__:")
+        print(f"  - d_model_c: {self.d_model_c}")
+        print(f"  - Creating coarse_adapter: Conv2d(160 -> {self.d_model_c})")
+        
+        self.coarse_adapter = nn.Conv2d(160, self.d_model_c, kernel_size=1)
+        
+        # debug
+        print(f"  - coarse_adapter.in_channels: {self.coarse_adapter.in_channels}")
+        print(f"  - coarse_adapter.out_channels: {self.coarse_adapter.out_channels}")
 
         # Keypoint encoder for position encoding
         # TODO: coarse.d_modelの値によって変化

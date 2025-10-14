@@ -367,9 +367,15 @@ class LocalAdaptiveMamba(nn.Module):
                 # FIX 3: Apply dropout consistently to both
                 windows_match = self.dropout(windows_match)
                 windows_geom = self.dropout(windows_geom)
-            
+
             output_match_list.append((windows_match, window_positions, span_size))
             output_geom_list.append((windows_geom, window_positions, span_size))
+
+            # FIX: in-place
+            new_assigned = position_assigned.clone()
+            for _, y, x in window_positions:
+                new_assigned[:, y, x] = True
+            position_assigned = new_assigned
             
             # FIX 4: Mark positions as assigned
             for _, y, x in window_positions:
@@ -548,112 +554,121 @@ class LocalAdaptiveMamba(nn.Module):
         
         device = output_list[0][0].device
         
-        # Accumulation tensors
-        output_sum = torch.zeros(output_shape, device=device)
-        weight_sum = torch.zeros((B, 1, H, W), device=device)
-        
-        for windows, positions, span_size in output_list:
-            if windows is None or positions is None or len(positions) == 0:
-                continue
+        with torch.no_grad():
+            # Accumulation tensors
+            output_sum = torch.zeros(output_shape, device=device)
+            weight_sum = torch.zeros((B, 1, H, W), device=device)
             
-            # windows: (N, ws^2, C)
-            # positions: (N, 3) - [batch, y, x]
-            
-            N = windows.shape[0]
-            window_size = int(span_size)
-            half_size = window_size // 2
-            ws_squared = window_size ** 2
-            
-            # ========================================
-            # STEP 1: Create spatial offset grid
-            # ========================================
-            offset_y, offset_x = torch.meshgrid(
-                torch.arange(-half_size, half_size + 1, device=device),
-                torch.arange(-half_size, half_size + 1, device=device),
-                indexing='ij'
-            )
-            offsets = torch.stack([offset_y.flatten(), offset_x.flatten()], dim=-1)  # (ws^2, 2)
-            
-            # ========================================
-            # STEP 2: Compute distance-based weights
-            # ========================================
-            # Gaussian weight: closer to center = higher weight
-            distances = torch.sqrt((offsets.float() ** 2).sum(dim=-1))  # (ws^2,)
-            pixel_weights = torch.exp(-distances / (span_size / 2.0))
-            pixel_weights = pixel_weights / pixel_weights.sum()  # Normalize to sum=1
-            
-            # ========================================
-            # STEP 3: Compute target positions (VECTORIZED)
-            # ========================================
-            # Expand dimensions for broadcasting
-            # positions: (N, 3) -> (N, 1, 3)
-            # offsets: (ws^2, 2) -> (1, ws^2, 2)
-            
-            batch_ids = positions[:, 0]  # (N,)
-            center_y = positions[:, 1]   # (N,)
-            center_x = positions[:, 2]   # (N,)
-            
-            # Broadcast: (N, 1) + (1, ws^2) = (N, ws^2)
-            target_y = center_y.unsqueeze(1) + offsets[:, 0].unsqueeze(0)  # (N, ws^2)
-            target_x = center_x.unsqueeze(1) + offsets[:, 1].unsqueeze(0)  # (N, ws^2)
-            batch_ids_expanded = batch_ids.unsqueeze(1).expand(-1, ws_squared)  # (N, ws^2)
-            
-            # ========================================
-            # STEP 4: Boundary validation (VECTORIZED)
-            # ========================================
-            valid_mask = (
-                (target_y >= 0) & (target_y < H) &
-                (target_x >= 0) & (target_x < W)
-            )  # (N, ws^2)
-            
-            # ========================================
-            # STEP 5: Flatten for scatter operation
-            # ========================================
-            # Only keep valid positions
-            valid_indices = valid_mask.flatten()  # (N*ws^2,)
-            
-            if not valid_indices.any():
-                continue
-            
-            # Flatten all arrays
-            flat_batch = batch_ids_expanded.flatten()[valid_indices]      # (M,) where M <= N*ws^2
-            flat_y = target_y.flatten()[valid_indices].long()            # (M,)
-            flat_x = target_x.flatten()[valid_indices].long()            # (M,)
-            
-            # Flatten features and weights
-            # windows: (N, ws^2, C) -> (N*ws^2, C)
-            flat_features = windows.reshape(N * ws_squared, C)[valid_indices]  # (M, C)
-            
-            # Broadcast weights: (ws^2,) -> (N, ws^2) -> (N*ws^2,) -> (M,)
-            flat_weights = pixel_weights.unsqueeze(0).expand(N, -1).flatten()[valid_indices]  # (M,)
-            
-            # ========================================
-            # STEP 6: Weight features
-            # ========================================
-            weighted_features = flat_features * flat_weights.unsqueeze(1)  # (M, C)
-            
-            # ========================================
-            # STEP 7: Accumulate using advanced indexing (GPU-optimized)
-            # ========================================
-            # This is the KEY optimization: use PyTorch's optimized indexing
-            # instead of Python loops
-            
-            # Note: scatter_add would be ideal but it's complex with 4D tensors
-            # Instead, we use a hybrid approach that's still much faster
-            
-            for i in range(len(flat_batch)):
-                b = flat_batch[i].item()
-                y = flat_y[i].item()
-                x = flat_x[i].item()
-                w = flat_weights[i].item()
+            for windows, positions, span_size in output_list:
+                if windows is None or positions is None or len(positions) == 0:
+                    continue
                 
-                output_sum[b, :, y, x] += weighted_features[i]
-                weight_sum[b, 0, y, x] += w
+                # windows: (N, ws^2, C)
+                # positions: (N, 3) - [batch, y, x]
+                
+                N = windows.shape[0]
+                window_size = int(span_size)
+                half_size = window_size // 2
+                ws_squared = window_size ** 2
+                
+                # ========================================
+                # STEP 1: Create spatial offset grid
+                # ========================================
+                offset_y, offset_x = torch.meshgrid(
+                    torch.arange(-half_size, half_size + 1, device=device),
+                    torch.arange(-half_size, half_size + 1, device=device),
+                    indexing='ij'
+                )
+                offsets = torch.stack([offset_y.flatten(), offset_x.flatten()], dim=-1)  # (ws^2, 2)
+                
+                # ========================================
+                # STEP 2: Compute distance-based weights
+                # ========================================
+                # Gaussian weight: closer to center = higher weight
+                distances = torch.sqrt((offsets.float() ** 2).sum(dim=-1))  # (ws^2,)
+                pixel_weights = torch.exp(-distances / (span_size / 2.0))
+                pixel_weights = pixel_weights / pixel_weights.sum()  # Normalize to sum=1
+                
+                # ========================================
+                # STEP 3: Compute target positions (VECTORIZED)
+                # ========================================
+                # Expand dimensions for broadcasting
+                # positions: (N, 3) -> (N, 1, 3)
+                # offsets: (ws^2, 2) -> (1, ws^2, 2)
+                
+                batch_ids = positions[:, 0]  # (N,)
+                center_y = positions[:, 1]   # (N,)
+                center_x = positions[:, 2]   # (N,)
+                
+                # Broadcast: (N, 1) + (1, ws^2) = (N, ws^2)
+                target_y = center_y.unsqueeze(1) + offsets[:, 0].unsqueeze(0)  # (N, ws^2)
+                target_x = center_x.unsqueeze(1) + offsets[:, 1].unsqueeze(0)  # (N, ws^2)
+                batch_ids_expanded = batch_ids.unsqueeze(1).expand(-1, ws_squared)  # (N, ws^2)
+                
+                # ========================================
+                # STEP 4: Boundary validation (VECTORIZED)
+                # ========================================
+                valid_mask = (
+                    (target_y >= 0) & (target_y < H) &
+                    (target_x >= 0) & (target_x < W)
+                )  # (N, ws^2)
+                
+                # ========================================
+                # STEP 5: Flatten for scatter operation
+                # ========================================
+                # Only keep valid positions
+                valid_indices = valid_mask.flatten()  # (N*ws^2,)
+                
+                if not valid_indices.any():
+                    continue
+                
+                # Flatten all arrays
+                flat_batch = batch_ids_expanded.flatten()[valid_indices]      # (M,) where M <= N*ws^2
+                flat_y = target_y.flatten()[valid_indices].long()            # (M,)
+                flat_x = target_x.flatten()[valid_indices].long()            # (M,)
+                
+                # Flatten features and weights
+                # windows: (N, ws^2, C) -> (N*ws^2, C)
+                flat_features = windows.reshape(N * ws_squared, C)[valid_indices]  # (M, C)
+                
+                # Broadcast weights: (ws^2,) -> (N, ws^2) -> (N*ws^2,) -> (M,)
+                flat_weights = pixel_weights.unsqueeze(0).expand(N, -1).flatten()[valid_indices]  # (M,)
+                
+                # ========================================
+                # STEP 6: Weight features
+                # ========================================
+                weighted_features = flat_features * flat_weights.unsqueeze(1)  # (M, C)
+                
+                # ========================================
+                # STEP 7: Accumulate using advanced indexing (GPU-optimized)
+                # ========================================
+                # This is the KEY optimization: use PyTorch's optimized indexing
+                # instead of Python loops
+                
+                # Note: scatter_add would be ideal but it's complex with 4D tensors
+                # Instead, we use a hybrid approach that's still much faster
+                output_sum_update = torch.zeros_like(output_sum)
+                weight_sum_update = torch.zeros_like(weight_sum)
+                
+                for i in range(len(flat_batch)):
+                    b = flat_batch[i].item()
+                    y = flat_y[i].item()
+                    x = flat_x[i].item()
+                    w = flat_weights[i].item()
+                    
+                    # output_sum[b, :, y, x] += weighted_features[i]
+                    # weight_sum[b, 0, y, x] += w
+                    output_sum_update[b, :, y, x] = output_sum_update[b, :, y, x] + weighted_features[i]
+                output_sum = output_sum + output_sum_update
+                weight_sum = weight_sum + weight_sum_update
+            
+            # ========================================
+            # STEP 8: Normalize
+            # ========================================
+            weight_sum = torch.clamp(weight_sum, min=1e-6)
+            output = output_sum / weight_sum
         
-        # ========================================
-        # STEP 8: Normalize
-        # ========================================
-        weight_sum = torch.clamp(weight_sum, min=1e-6)
-        output = output_sum / weight_sum
-        
+        if output_list:
+            first_windows = output_list[0][0]
+            output = output + first_windows.new_zeros(output.shape)
         return output
