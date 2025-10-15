@@ -1,240 +1,172 @@
 """
-Integration test for AS-Mamba model.
-Tests model instantiation and forward pass with dummy data.
+Test script for AS-Mamba.
+
+Usage:
+    # Test on ScanNet
+    python test_as_mamba.py \
+        configs/data/scannet_test_1500.py \
+        configs/as_mamba/indoor/test.py \
+        --ckpt_path weights/as_mamba_indoor.ckpt \
+        --dump_dir results/as_mamba_scannet \
+        --gpus 1
+
+    # Test on MegaDepth
+    python test_as_mamba.py \
+        configs/data/megadepth_test_1500.py \
+        configs/as_mamba/outdoor/test.py \
+        --ckpt_path weights/as_mamba_outdoor.ckpt \
+        --dump_dir results/as_mamba_megadepth \
+        --gpus 1
+
+    # Quick test (no result saving)
+    python test_as_mamba.py \
+        configs/data/scannet_test_1500.py \
+        configs/as_mamba/indoor/test.py \
+        --ckpt_path weights/as_mamba_indoor.ckpt \
+        --gpus 1
 """
 
-import torch
-import sys
+import argparse
+import pprint
 from pathlib import Path
 
-# Add project root to path
-sys.path.append(str(Path(__file__).parent))
+import pytorch_lightning as pl
+from loguru import logger as loguru_logger
 
 from src.config.as_mamba_default import get_cfg_defaults
-from src.jamma.as_mamba import AS_Mamba
-from src.jamma.backbone import CovNextV2_nano
+from src.lightning.data import MultiSceneDataModule
+from src.lightning.lightning_as_mamba import PL_ASMamba
+from src.utils.profiler import build_profiler
 
 
-def create_dummy_data(batch_size=2, height=256, width=256, device='cuda'):
-    """Create dummy input data for testing."""
-    data = {
-        # Image data
-        'imagec_0': torch.randn(batch_size, 3, height, width).to(device),
-        'imagec_1': torch.randn(batch_size, 3, height, width).to(device),
-        
-        # Metadata
-        'bs': batch_size,
-        'dataset_name': ['test'],
-        'pair_names': [('img0', 'img1')] * batch_size,
-    }
-    return data
-
-
-def test_backbone():
-    """Test CNN backbone."""
-    print("Testing CNN Backbone...")
-    backbone = CovNextV2_nano()
+def parse_args():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description='AS-Mamba Test Script'
+    )
     
-    # Create dummy data
-    data = create_dummy_data(batch_size=1, device='cpu')
+    # Configuration
+    parser.add_argument(
+        'data_cfg_path', type=str,
+        help='Data config path (e.g., configs/data/scannet_test_1500.py)'
+    )
+    parser.add_argument(
+        'main_cfg_path', type=str,
+        help='Main config path (e.g., configs/as_mamba/indoor/test.py)'
+    )
     
-    # Forward pass
-    try:
-        backbone(data)
-        print("✓ Backbone forward pass successful")
-        print(f"  - feat_8_0 shape: {data['feat_8_0'].shape}")
-        print(f"  - feat_8_1 shape: {data['feat_8_1'].shape}")
-        print(f"  - feat_4_0 shape: {data['feat_4_0'].shape}")
-        print(f"  - feat_4_1 shape: {data['feat_4_1'].shape}")
-    except Exception as e:
-        print(f"✗ Backbone test failed: {e}")
-        return False
-    return True
-
-
-def test_as_mamba_model():
-    """Test complete AS-Mamba model."""
-    print("\nTesting AS-Mamba Model...")
+    # Model checkpoint
+    parser.add_argument(
+        '--ckpt_path', type=str, required=True,
+        help='Path to trained AS-Mamba checkpoint'
+    )
     
-    # Load config
-    config = get_cfg_defaults()
+    # Output
+    parser.add_argument(
+        '--dump_dir', type=str, default=None,
+        help='Directory to save matching results and visualizations'
+    )
+    parser.add_argument(
+        '--save_viz', action='store_true',
+        help='Save visualization images'
+    )
     
-    # Convert to dict format expected by model
-    config_dict = {
-        'coarse': {'d_model': config.AS_MAMBA.COARSE.D_MODEL},
-        'fine': {'d_model': config.AS_MAMBA.FINE.D_MODEL,
-                 'dsmax_temperature': 0.1,
-                 'inference': True,
-                 'thr': 0.2,
-                 },
-        'resolution': config.AS_MAMBA.RESOLUTION,
-        'fine_window_size': config.AS_MAMBA.FINE_WINDOW_SIZE,
-        'match_coarse': {
-            'thr': 0.2, 'use_sm': True, 'border_rm': 2,
-            'dsmax_temperature': 0.1, 'inference': True
-        },
-        'as_mamba': {
-            'n_blocks': 1,  # Reduce for memory test
-            'd_geom': 32,
-            'use_kan_flow': False,
-            'global_depth': 1,
-            'local_depth': 1,
-            'use_geom_for_fine': False,
-            'window_size': 2 
-        }
-    }
+    # Runtime options
+    parser.add_argument(
+        '--profiler_name', type=str, default='inference',
+        help='Profiler: [inference, pytorch] or None'
+    )
+    parser.add_argument(
+        '--batch_size', type=int, default=1,
+        help='Batch size (typically 1 for testing)'
+    )
+    parser.add_argument(
+        '--num_workers', type=int, default=2,
+        help='Number of data loading workers'
+    )
     
-    # Create model
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
+    # Matching threshold tuning
+    parser.add_argument(
+        '--coarse_thr', type=float, default=None,
+        help='Override coarse matching threshold'
+    )
+    parser.add_argument(
+        '--fine_thr', type=float, default=None,
+        help='Override fine matching threshold'
+    )
     
-    try:
-        model = AS_Mamba(config_dict)
-        model = model.to(device)
-        model.eval()
-        print("✓ Model instantiation successful")
-        
-        # Count parameters
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"  - Total parameters: {n_params/1e6:.2f}M")
-        
-        # Count AS-Mamba blocks
-        print(f"  - Number of AS-Mamba blocks: {len(model.as_mamba_blocks)}")
-        
-    except Exception as e:
-        print(f"✗ Model instantiation failed: {e}")
-        return False
+    # Add PyTorch Lightning arguments
+    parser = pl.Trainer.add_argparse_args(parser)
     
-    # Test forward pass
-    print("\nTesting forward pass...")
-    
-    # Create dummy data with backbone
-    backbone = CovNextV2_nano().to(device)
-    data = create_dummy_data(batch_size=2, device=device)
-    
-    try:
-        with torch.no_grad():
-            # Extract features with backbone
-            backbone(data)
-            
-            # Forward through AS-Mamba
-            model(data, mode='test')
-            
-        print("✓ Forward pass successful")
-        
-        # Check outputs
-        if 'mkpts0_c' in data:
-            print(f"  - Coarse matches: {data['mkpts0_c'].shape[0]}")
-        if 'mkpts0_f' in data:
-            print(f"  - Fine matches: {data['mkpts0_f'].shape[0]}")
-        if 'as_mamba_flow' in data:
-            print(f"  - Flow map shape: {data['as_mamba_flow'].shape}")
-        if 'feat_geom_0' in data:
-            print(f"  - Geometry features shape: {data['feat_geom_0'].shape}")
-            
-    except Exception as e:
-        print(f"✗ Forward pass failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
-    return True
-
-
-def test_memory_usage():
-    """Test memory usage with different batch sizes."""
-    print("\nTesting memory usage...")
-    
-    if not torch.cuda.is_available():
-        print("CUDA not available, skipping memory test")
-        return
-    
-    config = get_cfg_defaults()
-    config_dict = {
-        'coarse': {'d_model': config.AS_MAMBA.COARSE.D_MODEL},
-        'fine': {'d_model': config.AS_MAMBA.FINE.D_MODEL,
-                 'dsmax_temperature': 0.1,
-                 'inference': True,
-                 'thr': 0.2,
-                 },
-        'resolution': config.AS_MAMBA.RESOLUTION,
-        'fine_window_size': config.AS_MAMBA.FINE_WINDOW_SIZE,
-        'match_coarse': {
-            'thr': 0.2, 'use_sm': True, 'border_rm': 2,
-            'dsmax_temperature': 0.1, 'inference': True
-        },
-        'as_mamba': {
-            'n_blocks': 1,  # Reduce for memory test
-            'd_geom': 32,
-            'use_kan_flow': False,
-            'global_depth': 1,
-            'local_depth': 1,
-            'use_geom_for_fine': False,
-            'window_size': 2
-        }
-    }
-    
-    model = AS_Mamba(config_dict).cuda().eval()
-    backbone = CovNextV2_nano().cuda().eval()
-    
-    batch_sizes = [1, 2, 4]
-    for bs in batch_sizes:
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            
-            data = create_dummy_data(batch_size=bs, device='cuda')
-            
-            with torch.no_grad():
-                backbone(data)
-                model(data, mode='test')
-            
-            memory_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-            print(f"  - Batch size {bs}: {memory_mb:.1f} MB")
-            
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                print(f"  - Batch size {bs}: OOM")
-                break
-            else:
-                raise e
+    return parser.parse_args()
 
 
 def main():
-    """Run all tests."""
-    print("="*50)
-    print("AS-Mamba Integration Tests")
-    print("="*50)
+    # Parse arguments
+    args = parse_args()
+    pprint.pprint(vars(args))
     
-    tests = [
-        ("Backbone", test_backbone),
-        ("AS-Mamba Model", test_as_mamba_model),
-        ("Memory Usage", test_memory_usage)
-    ]
+    # Load configuration
+    config = get_cfg_defaults()
+    config.merge_from_file(args.main_cfg_path)
+    config.merge_from_file(args.data_cfg_path)
     
-    results = []
-    for test_name, test_func in tests:
-        print(f"\n{'='*30}")
-        success = test_func()
-        results.append((test_name, success))
+    # Set seed for reproducibility
+    pl.seed_everything(config.TRAINER.SEED)
     
-    # Summary
-    print("\n" + "="*50)
-    print("Test Summary:")
-    print("="*50)
-    for test_name, success in results:
-        status = "✓ PASSED" if success else "✗ FAILED"
-        print(f"{test_name:20s}: {status}")
+    # Override thresholds if specified
+    if args.coarse_thr is not None:
+        config.AS_MAMBA.MATCH_COARSE.THR = args.coarse_thr
+        loguru_logger.info(f"Overriding coarse threshold: {args.coarse_thr}")
     
-    all_passed = all(success for _, success in results if success is not False)
-    if all_passed:
-        print("\n🎉 All tests passed! AS-Mamba is ready for training.")
-    else:
-        print("\n⚠️  Some tests failed. Please check the errors above.")
+    if args.fine_thr is not None:
+        config.AS_MAMBA.FINE.THR = args.fine_thr
+        loguru_logger.info(f"Overriding fine threshold: {args.fine_thr}")
     
-    return all_passed
+    # Setup output directory
+    if args.dump_dir:
+        dump_path = Path(args.dump_dir)
+        dump_path.mkdir(parents=True, exist_ok=True)
+        loguru_logger.info(f"Results will be saved to: {dump_path}")
+        
+        # Save configuration
+        config_save_path = dump_path / 'test_config.yaml'
+        with open(config_save_path, 'w') as f:
+            f.write(config.dump())
+        loguru_logger.info(f"Configuration saved to: {config_save_path}")
+    
+    # Enable visualization saving
+    if args.save_viz:
+        config.TRAINER.SAVE_TEST_VIZ = True
+    
+    loguru_logger.info("Test Configuration:")
+    loguru_logger.info(f"  - Checkpoint: {args.ckpt_path}")
+    loguru_logger.info(f"  - Dataset: {config.DATASET.TEST_DATA_SOURCE}")
+    loguru_logger.info(f"  - Coarse Threshold: {config.AS_MAMBA.MATCH_COARSE.THR}")
+    loguru_logger.info(f"  - Fine Threshold: {config.AS_MAMBA.FINE.THR}")
+    loguru_logger.info(f"  - AS-Mamba Blocks: {config.AS_MAMBA.N_BLOCKS}")# Initialize profiler
+    profiler = build_profiler(args.profiler_name)# Initialize AS-Mamba model
+    model = PL_ASMamba(
+        config,
+        pretrained_ckpt=args.ckpt_path,
+        profiler=profiler,
+        dump_dir=args.dump_dir
+    )
+    loguru_logger.info("AS-Mamba LightningModule initialized!")# Initialize data module
+    data_module = MultiSceneDataModule(args, config)
+    loguru_logger.info("DataModule initialized!")# Initialize trainer
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        replace_sampler_ddp=False,
+        logger=False
+    )
+    loguru_logger.info("=" * 80)
+    loguru_logger.info("Starting AS-Mamba Testing!")
+    loguru_logger.info("=" * 80)# Run test
+    trainer.test(model, datamodule=data_module, verbose=False)
+    loguru_logger.info("=" * 80)
+    loguru_logger.info("Testing completed!")
+    loguru_logger.info("=" * 80)
+    if __name__ == 'main':
+        main()
 
-
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)

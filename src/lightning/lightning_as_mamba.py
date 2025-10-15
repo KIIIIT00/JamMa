@@ -24,8 +24,7 @@ from matplotlib import pyplot as plt
 from src.jamma.backbone import CovNextV2_nano
 
 # AS-Mamba specific imports
-from src.jamma.as_mamba import ASMamba
-from src.jamma.backbone import build_backbone
+from src.jamma.as_mamba import AS_Mamba
 from src.jamma.utils.supervision import (
     compute_supervision_coarse,
     compute_supervision_fine, 
@@ -45,11 +44,17 @@ from src.utils.metrics import (
 from src.utils.comm import gather, all_gather
 from src.utils.misc import lower_config, flattenList
 from src.utils.profiler import PassThroughProfiler
-from src.utils.plotting import (
-    make_matching_figures,
-    make_flow_visualization,
-    make_adaptive_span_visualization
-)
+from src.utils.plotting import make_matching_figures
+try:
+    from src.utils.plotting import (
+        make_flow_visualization,
+        make_adaptive_span_visualization
+    )
+    HAS_ASMAMBA_VIZ = True
+except ImportError:
+    HAS_ASMAMBA_VIZ = False
+    print("Warning: AS-Mamba visualization functions not available. "
+          "Flow and span visualizations will be skipped.")
 
 
 class PL_ASMamba(pl.LightningModule):
@@ -69,7 +74,7 @@ class PL_ASMamba(pl.LightningModule):
         # Configuration
         self.config = config
         _config = lower_config(self.config)
-        self.asmamba_cfg = lower_config(_config['asmamba'])
+        self.asmamba_cfg = lower_config(_config['as_mamba'])
         
         # Profiler for performance analysis
         self.profiler = profiler or PassThroughProfiler()
@@ -114,11 +119,11 @@ class PL_ASMamba(pl.LightningModule):
         self.backbone = CovNextV2_nano()
         
         # AS-Mamba matcher with hierarchical blocks
-        self.matcher = ASMamba(
-            config=config['asmamba'],
+        self.matcher = AS_Mamba(
+            config=config['as_mamba'],
             profiler=self.profiler
         )
-        logger.info(f"AS-Mamba blocks: {config['asmamba']['num_blocks']}")
+        logger.info(f"AS-Mamba blocks: {config['as_mamba']['n_blocks']}")
         
         # Loss function with flow supervision
         self.loss = ASMambaLoss(config)
@@ -211,7 +216,7 @@ class PL_ASMamba(pl.LightningModule):
         # 3. Feature extraction with backbone
         with self.profiler.profile("Backbone"):
             with torch.autocast(
-                enabled=self.config.ASMAMBA.MP,
+                enabled=self.config.AS_MAMBA.MP,
                 device_type='cuda'
             ):
                 self.backbone(batch)
@@ -220,7 +225,7 @@ class PL_ASMamba(pl.LightningModule):
         # This includes: flow prediction -> adaptive spans -> hierarchical Mamba
         with self.profiler.profile("AS-Mamba Matcher"):
             with torch.autocast(
-                enabled=self.config.ASMAMBA.MP,
+                enabled=self.config.AS_MAMBA.MP,
                 device_type='cuda'
             ):
                 self.matcher(batch, mode=mode)
@@ -228,7 +233,7 @@ class PL_ASMamba(pl.LightningModule):
         # 5. Compute fine-level supervision
         with self.profiler.profile("Compute fine supervision"):
             with torch.autocast(
-                enabled=self.config.ASMAMBA.MP,
+                enabled=self.config.AS_MAMBA.MP,
                 device_type='cuda'
             ):
                 compute_supervision_fine(batch, self.config)
@@ -236,7 +241,7 @@ class PL_ASMamba(pl.LightningModule):
         # 6. Compute all losses (flow + matching + geometric)
         with self.profiler.profile("Compute losses"):
             with torch.autocast(
-                enabled=self.config.ASMAMBA.MP,
+                enabled=self.config.AS_MAMBA.MP,
                 device_type='cuda'
             ):
                 self.loss(batch)
@@ -509,7 +514,7 @@ class PL_ASMamba(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         """Test step with runtime profiling."""
         with torch.autocast(
-            enabled=self.config.ASMAMBA.MP,
+            enabled=self.config.AS_MAMBA.MP,
             device_type='cuda'
         ):
             # Time the inference

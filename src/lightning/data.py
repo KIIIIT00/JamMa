@@ -69,7 +69,13 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.mgdpt_img_pad = config.DATASET.MGDPT_IMG_PAD   # True
         self.mgdpt_depth_pad = config.DATASET.MGDPT_DEPTH_PAD   # True
         self.mgdpt_df = config.DATASET.MGDPT_DF  # 8
-        self.coarse_scale = 1 / config.JAMMA.RESOLUTION[0]  # 0.125. for training jamma.
+        # self.coarse_scale = 1 / config.JAMMA.RESOLUTION[0]  # 0.125. for training jamma.
+        if hasattr(config, 'AS_MAMBA'):
+            self.coarse_scale = 1 / config.AS_MAMBA.RESOLUTION[0]
+        elif hasattr(config, 'JAMMA'):
+            self.coarse_scale = 1 / config.JAMMA.RESOLUTION[0]
+        else:
+            raise AttributeError("Config must have either AS_MAMBA or JAMMA attribute")
 
         # 3.loader parameters
         self.train_loader_params = {

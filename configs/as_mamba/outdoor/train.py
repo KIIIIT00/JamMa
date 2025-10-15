@@ -1,0 +1,32 @@
+"""
+Full training configuration for AS-Mamba (Outdoor/MegaDepth)
+"""
+
+from configs.as_mamba.base import cfg
+
+# Full model
+cfg.AS_MAMBA.RESOLUTION = (8, 2)
+cfg.AS_MAMBA.FINE_WINDOW_SIZE = 5
+cfg.AS_MAMBA.COARSE.D_MODEL = 256
+cfg.AS_MAMBA.FINE.D_MODEL = 64
+cfg.AS_MAMBA.N_BLOCKS = 3
+cfg.AS_MAMBA.GLOBAL_DEPTH = 4
+cfg.AS_MAMBA.LOCAL_DEPTH = 4
+
+# Training
+cfg.TRAINER.SCHEDULER = 'CosineAnnealing'
+cfg.TRAINER.COSA_TMAX = 30
+cfg.TRAINER.CANONICAL_BS = 2
+cfg.TRAINER.CANONICAL_LR = 1e-4
+cfg.TRAINER.WARMUP_STEP = 58200  # ~3 epochs on MegaDepth
+cfg.TRAINER.OPTIMIZER = "adamw"
+cfg.TRAINER.ADAMW_DECAY = 0.1
+
+# Outdoor-specific
+cfg.TRAINER.EPI_ERR_THR = 1e-4
+cfg.TRAINER.RANSAC_PIXEL_THR = 0.5
+
+cfg.AS_MAMBA.MATCH_COARSE.TRAIN_COARSE_PERCENT = 0.3
+cfg.AS_MAMBA.MATCH_COARSE.TRAIN_PAD_NUM_GT_MIN = 20
+cfg.TRAINER.N_VAL_PAIRS_TO_PLOT = 1
+cfg.TRAINER.SEED = 66

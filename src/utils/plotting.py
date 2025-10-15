@@ -354,3 +354,165 @@ def error_colormap(err, thr, alpha=1.0):
     x = 1 - np.clip(err / (thr * 2), 0, 1)
     return np.clip(
         np.stack([2-x*2, x*2, np.zeros_like(x), np.ones_like(x)*alpha], -1), 0, 1)
+
+def make_flow_visualization(data, block_idx=-1, path=None, return_fig=False):
+    """
+    Visualize flow predictions with uncertainty for AS-Mamba.
+    
+    Args:
+        data: Batch dictionary containing 'predict_flow'
+        block_idx: Which AS-Mamba block to visualize (-1 for last)
+        path: Save path (if None, returns figure)
+        return_fig: Whether to return figure object
+    
+    Returns:
+        Figure object if return_fig=True, else None
+    """
+    if 'predict_flow' not in data or len(data['predict_flow']) == 0:
+        return None
+    
+    try:
+        # Extract flow predictions
+        flow_list = data['predict_flow']
+        if block_idx >= len(flow_list):
+            block_idx = -1
+        
+        flow_0to1, flow_1to0 = flow_list[block_idx]
+        
+        # Take first sample in batch
+        if flow_0to1.dim() == 5:  # (N_blocks, B, H, W, 4)
+            flow = flow_0to1[0, 0].detach().cpu().numpy()
+        elif flow_0to1.dim() == 4:  # (B, H, W, 4)
+            flow = flow_0to1[0].detach().cpu().numpy()
+        else:
+            return None
+        
+        H, W = flow.shape[:2]
+        flow_x, flow_y = flow[..., 0], flow[..., 1]
+        
+        # Compute flow magnitude
+        flow_mag = np.sqrt(flow_x**2 + flow_y**2)
+        
+        # Create figure
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=100)
+        
+        # 1. Flow magnitude heatmap
+        im1 = axes[0].imshow(flow_mag, cmap='jet', interpolation='nearest')
+        axes[0].set_title(f'Flow Magnitude (Block {block_idx})\nMax: {flow_mag.max():.2f} px')
+        axes[0].axis('off')
+        plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+        
+        # 2. Flow field visualization (subsampled)
+        stride = max(H // 20, 1)
+        y_coords, x_coords = np.meshgrid(
+            np.arange(0, H, stride),
+            np.arange(0, W, stride),
+            indexing='ij'
+        )
+        
+        u = flow_x[::stride, ::stride]
+        v = flow_y[::stride, ::stride]
+        magnitude = np.sqrt(u**2 + v**2)
+        
+        axes[1].imshow(np.zeros((H, W)), cmap='gray', alpha=0.3)
+        quiver = axes[1].quiver(
+            x_coords, y_coords, u, v,
+            magnitude,
+            cmap='jet',
+            scale=None,
+            scale_units='xy',
+            angles='xy',
+            width=0.003,
+            headwidth=4,
+            headlength=5
+        )
+        axes[1].set_title('Flow Field Vectors')
+        axes[1].set_xlim(0, W)
+        axes[1].set_ylim(H, 0)
+        axes[1].axis('off')
+        plt.colorbar(quiver, ax=axes[1], fraction=0.046, pad=0.04, label='Magnitude')
+        
+        plt.tight_layout()
+        
+        if path is not None:
+            plt.savefig(str(path), dpi=100, bbox_inches='tight')
+            plt.close()
+            return None
+        elif return_fig:
+            return fig
+        else:
+            plt.show()
+            return None
+            
+    except Exception as e:
+        print(f"Warning: Could not create flow visualization: {e}")
+        return None
+
+
+def make_adaptive_span_visualization(data, path=None, return_fig=False):
+    """
+    Visualize adaptive span distributions for AS-Mamba.
+    
+    Args:
+        data: Batch dictionary containing 'adaptive_spans'
+        path: Save path
+        return_fig: Whether to return figure
+    
+    Returns:
+        Figure object if return_fig=True, else None
+    """
+    if 'adaptive_spans' not in data:
+        return None
+    
+    try:
+        spans_x, spans_y = data['adaptive_spans']
+        
+        # Take first sample
+        span_x = spans_x[0].detach().cpu().numpy()
+        span_y = spans_y[0].detach().cpu().numpy()
+        
+        # Average span size
+        span_avg = (span_x + span_y) / 2.0
+        
+        H, W = span_avg.shape
+        
+        # Create figure
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4), dpi=100)
+        
+        # 1. X-direction span heatmap
+        im1 = axes[0].imshow(span_x, cmap='viridis', interpolation='nearest')
+        axes[0].set_title(f'Adaptive Spans (X)\nRange: [{span_x.min():.0f}, {span_x.max():.0f}]')
+        axes[0].axis('off')
+        plt.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+        
+        # 2. Y-direction span heatmap
+        im2 = axes[1].imshow(span_y, cmap='viridis', interpolation='nearest')
+        axes[1].set_title(f'Adaptive Spans (Y)\nRange: [{span_y.min():.0f}, {span_y.max():.0f}]')
+        axes[1].axis('off')
+        plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+        
+        # 3. Span distribution histogram
+        axes[2].hist(span_avg.flatten(), bins=20, color='steelblue', alpha=0.7, edgecolor='black')
+        axes[2].axvline(span_avg.mean(), color='red', linestyle='--', linewidth=2, 
+                       label=f'Mean: {span_avg.mean():.2f}')
+        axes[2].set_xlabel('Span Size (pixels)')
+        axes[2].set_ylabel('Frequency')
+        axes[2].set_title('Span Distribution')
+        axes[2].legend()
+        axes[2].grid(alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if path is not None:
+            plt.savefig(str(path), dpi=100, bbox_inches='tight')
+            plt.close()
+            return None
+        elif return_fig:
+            return fig
+        else:
+            plt.show()
+            return None
+            
+    except Exception as e:
+        print(f"Warning: Could not create adaptive span visualization: {e}")
+        return None
