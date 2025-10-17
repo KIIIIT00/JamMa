@@ -47,7 +47,7 @@ def spvs_coarse(data, config):
     device = data['imagec_0'].device
     N, _, H0, W0 = data['imagec_0'].shape
     _, _, H1, W1 = data['imagec_1'].shape
-    scale = config['JAMMA']['RESOLUTION'][0]
+    scale = config['AS_MAMBA']['RESOLUTION'][0]
     scale0 = scale * data['scale0'][:, None] if 'scale0' in data else scale
     scale1 = scale * data['scale1'][:, None] if 'scale1' in data else scale
     h0, w0, h1, w1 = map(lambda x: x // scale, [H0, W0, H1, W1])
@@ -151,12 +151,12 @@ def spvs_fine(data, config):
     device = data['imagec_0'].device
     N, _, H0, W0 = data['imagec_0'].shape
     _, _, H1, W1 = data['imagec_1'].shape
-    scale = config['JAMMA']['RESOLUTION'][1]
+    scale = config['AS_MAMBA']['RESOLUTION'][1]
     scale0 = scale * data['scale0'][:, None] if 'scale0' in data else scale
     scale1 = scale * data['scale1'][:, None] if 'scale1' in data else scale
     h0, w0, h1, w1 = map(lambda x: x // scale, [H0, W0, H1, W1])
-    scale_f_c = config['JAMMA']['RESOLUTION'][0] // config['JAMMA']['RESOLUTION'][1]
-    W_f = config['JAMMA']['FINE_WINDOW_SIZE']
+    scale_f_c = config['AS_MAMBA']['RESOLUTION'][0] // config['AS_MAMBA']['RESOLUTION'][1]
+    W_f = config['AS_MAMBA']['FINE_WINDOW_SIZE']
     # 2. get coarse prediction
     b_ids, i_ids, j_ids = data['b_ids_fine'], data['i_ids_fine'], data['j_ids_fine']
 

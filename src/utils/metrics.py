@@ -449,3 +449,117 @@ def aggregate_metrics(metrics, epi_err_thr=5e-4):
     else:
         return {**aucs, **precs, **num}
 
+def compute_homography_error(data):
+    """
+    Compute homography estimation error for HPatches.
+    
+    Updates:
+        data (dict): {
+            'H_errs': List[float] - corner reprojection errors
+            'H_est_success': List[bool] - whether estimation succeeded
+        }
+    """
+    if 'H_0to1' not in data:
+        return
+    
+    data.update({'H_errs': [], 'H_est_success': []})
+    
+    m_bids = data['m_bids'].cpu().numpy()
+    pts0 = data['mkpts0_f'].cpu().numpy()
+    pts1 = data['mkpts1_f'].cpu().numpy()
+    H_gt = data['H_0to1'].cpu().numpy()
+    
+    h, w = data['image0'].shape[-2:]
+    corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
+    
+    for bs in range(H_gt.shape[0]):
+        mask = m_bids == bs
+        
+        if mask.sum() < 4:
+            # Not enough points for homography estimation
+            data['H_errs'].append(np.inf)
+            data['H_est_success'].append(False)
+            continue
+        
+        # Estimate homography with RANSAC
+        H_est, inliers = cv2.findHomography(
+            pts0[mask], pts1[mask],
+            method=cv2.RANSAC,
+            ransacReprojThreshold=3.0
+        )
+        
+        if H_est is None:
+            data['H_errs'].append(np.inf)
+            data['H_est_success'].append(False)
+            continue
+        
+        # Compute corner reprojection error
+        corners_transformed_gt = cv2.perspectiveTransform(
+            corners.reshape(1, -1, 2), H_gt[bs]
+        ).reshape(-1, 2)
+        
+        corners_transformed_est = cv2.perspectiveTransform(
+            corners.reshape(1, -1, 2), H_est
+        ).reshape(-1, 2)
+        
+        corner_error = np.linalg.norm(
+            corners_transformed_gt - corners_transformed_est,
+            axis=1
+        ).mean()
+        
+        data['H_errs'].append(corner_error)
+        data['H_est_success'].append(True)
+
+
+def aggregate_metrics_hpatches(metrics):
+    """
+    Aggregate HPatches-specific metrics.
+    
+    Returns:
+        dict with:
+            - homography_auc@{1,3,5}: AUC for corner error thresholds
+            - homography_accuracy@{1,3,5}: Percentage below threshold
+            - mean_corner_error: Average corner reprojection error
+    """
+    H_errs = np.array(metrics['H_errs'])
+    H_success = np.array(metrics['H_est_success'])
+    
+    # Filter out failed estimations
+    valid_errs = H_errs[H_success]
+    
+    if len(valid_errs) == 0:
+        logger.warning("No valid homography estimations!")
+        return {
+            'homography_auc@1': 0.0,
+            'homography_auc@3': 0.0,
+            'homography_auc@5': 0.0,
+            'mean_corner_error': np.inf,
+            'estimation_success_rate': 0.0
+        }
+    
+    # Compute AUC for different thresholds
+    thresholds = [1, 3, 5]
+    aucs = {}
+    accuracies = {}
+    
+    for thr in thresholds:
+        accuracy = (valid_errs < thr).mean()
+        accuracies[f'homography_accuracy@{thr}'] = accuracy
+        
+        # Compute AUC
+        errors_sorted = np.sort(valid_errs)
+        recall = np.linspace(0, 1, len(errors_sorted))
+        
+        # Find index where error exceeds threshold
+        idx = np.searchsorted(errors_sorted, thr)
+        auc = np.trapz(recall[:idx], errors_sorted[:idx]) / thr if idx > 0 else 0.0
+        aucs[f'homography_auc@{thr}'] = auc
+    
+    return {
+        **aucs,
+        **accuracies,
+        'mean_corner_error': valid_errs.mean(),
+        'median_corner_error': np.median(valid_errs),
+        'estimation_success_rate': H_success.mean()
+    }
+
