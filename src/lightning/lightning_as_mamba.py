@@ -39,7 +39,9 @@ from src.utils.metrics import (
     compute_symmetrical_epipolar_errors,
     compute_pose_errors,
     aggregate_metrics_train_val,
-    aggregate_metrics_test
+    aggregate_metrics_test,
+    compute_homography_error,
+    aggregate_metrics_hpatches
 )
 from src.utils.comm import gather, all_gather
 from src.utils.misc import lower_config, flattenList
@@ -538,6 +540,12 @@ class PL_ASMamba(pl.LightningModule):
         
         # Compute metrics
         ret_dict, rel_pair_names = self._compute_metrics(batch, compute_f1_score=False)
+
+        # HPatches specific metrics
+        if batch['dataset_name'][0] == 'HPatches':
+            compute_homography_error(batch)
+            ret_dict['metrics']['H_errs'] = batch['H_errs']
+            ret_dict['metrics']['H_est_success'] = batch['H_est_success']
         
         # Optional: Save visualizations
         if self.config.TRAINER.get('SAVE_TEST_VIZ', False):
@@ -604,6 +612,24 @@ class PL_ASMamba(pl.LightningModule):
         
         # Rank 0: compute and log final metrics
         if self.trainer.global_rank == 0:
+
+            dataset_name = outputs[0].get('dataset_name', 'Unknown')
+        
+            if 'HPatches' in str(dataset_name):
+                # Use HPatches-specific metrics
+                val_metrics_4tb = aggregate_metrics_hpatches(
+                    metrics,
+                    config=self.config
+                )
+            else:
+                # Use standard metrics
+                val_metrics_4tb = aggregate_metrics_test(
+                    metrics,
+                    self.config.TRAINER.EPI_ERR_THR,
+                    config=self.config
+                )
+            
+            logger.info('\n' + pprint.pformat(val_metrics_4tb))
             # Print profiler summary
             print(self.profiler.summary())
             

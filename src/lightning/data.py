@@ -25,6 +25,7 @@ from src.utils.misc import tqdm_joblib
 from src.utils import comm
 from src.datasets.megadepth import MegaDepthDataset
 from src.datasets.scannet import ScanNetDataset
+from src.datasets.hpatches import HPatchesDataset
 from src.datasets.sampler import RandomConcatSampler
 
 
@@ -104,6 +105,11 @@ class MultiSceneDataModule(pl.LightningDataModule):
         self.repeat = config.TRAINER.SB_REPEAT
         
         # (optional) RandomSampler for debugging
+
+        # HPatches specific options
+        self.hpatches_alteration = getattr(
+            config.DATASET, 'HPATCHES_ALTERATION', 'all'
+        )
 
         # misc configurations
         self.parallel_load_data = getattr(args, 'parallel_load_data', False)
@@ -208,8 +214,22 @@ class MultiSceneDataModule(pl.LightningDataModule):
         datasets = []
         augment_fn = self.augment_fn if mode == 'train' else None
         data_source = self.trainval_data_source if mode in ['train', 'val'] else self.test_data_source
+
+        if str(data_source).lower() == 'hpatches':
+            assert mode in ['val', 'test'], "HPatches is only for evaluation"
+            dataset = HPatchesDataset(
+                data_root=data_root,
+                mode=mode,
+                img_resize=self.mgdpt_img_resize, 
+                df=self.mgdpt_df,
+                img_padding=self.mgdpt_img_pad,
+                alteration=self.hpatches_alteration
+            )
+            return dataset 
+        
         if str(data_source).lower() == 'megadepth':
             npz_names = [f'{n}.npz' for n in npz_names]
+        
         for npz_name in tqdm(npz_names,
                              desc=f'[rank:{self.rank}] loading {mode} datasets',
                              disable=int(self.rank) != 0):
