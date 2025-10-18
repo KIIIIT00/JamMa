@@ -91,6 +91,8 @@ class MegaDepthDataset(Dataset):
         data = {
             'imagec_0': imagec_0.squeeze(0),  # (1, h, w, 3)
             'imagec_1': imagec_1.squeeze(0),  # (1, h, w, 3)
+            'hw0_c': (imagec_0.shape[1], imagec_0.shape[2]),
+            'hw1_c': (imagec_1.shape[1], imagec_1.shape[2]),
             'depth0': depth0,  # (h, w)
             'depth1': depth1,
             'prepad_size0': prepad_size0,

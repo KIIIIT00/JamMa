@@ -308,6 +308,11 @@ class PL_ASMamba(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step."""
+        ## Memory logging
+        if batch_idx % 10 == 0:
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            logger.info(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
         self._trainval_inference(batch, mode='train')
         
         # Logging

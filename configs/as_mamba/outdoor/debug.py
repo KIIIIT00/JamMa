@@ -8,6 +8,11 @@ from configs.as_mamba.base import cfg
 cfg.AS_MAMBA.N_BLOCKS = 2
 cfg.AS_MAMBA.GLOBAL_DEPTH = 2
 cfg.AS_MAMBA.LOCAL_DEPTH = 2
+cfg.AS_MAMBA.MP = True
+
+## Memory optimizations
+cfg.AS_MAMBA.USE_CHECKPOINT = True
+cfg.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
 
 # Training settings
 cfg.TRAINER.CANONICAL_BS = 1

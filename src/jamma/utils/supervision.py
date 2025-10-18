@@ -297,14 +297,20 @@ def compute_supervision_flow(data, config):
         b = spv_b_ids[idx]
         i = spv_i_ids[idx]
         j = spv_j_ids[idx]
+        if i >= h0 * w0:
+            continue
         
         # Convert linear indices to 2D coordinates
         i_y, i_x = i // w0, i % w0
+        
+        if j >= h1 * w1:
+            continue
         j_y, j_x = j // w1, j % w1
         
         # Flow from i to j (0 -> 1)
         flow_x = j_x.float() - i_x.float()
         flow_y = j_y.float() - i_y.float()
+        print(f"flow_x: {flow_x}, flow_y: {flow_y}")
         flow_gt_0to1[b, i_y, i_x, 0] = flow_x
         flow_gt_0to1[b, i_y, i_x, 1] = flow_y
         

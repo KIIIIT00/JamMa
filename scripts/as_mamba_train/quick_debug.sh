@@ -15,6 +15,7 @@ python train_as_mamba.py \
     --limit_train_batches 10 \
     --limit_val_batches 5 \
     --val_check_interval 5 \
+    --precision 16 \
     --debug
 
 echo "Debug run completed!"

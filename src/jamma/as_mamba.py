@@ -11,6 +11,8 @@ from src.utils.profiler import PassThroughProfiler
 torch.backends.cudnn.deterministic = True
 INF = 1E9
 
+import logging
+logger = logging.getLogger(__name__)
 
 class AS_Mamba(nn.Module):
     """
@@ -41,10 +43,16 @@ class AS_Mamba(nn.Module):
         self.global_depth = config.get('as_mamba', {}).get('global_depth', 4)  # Depth for global Mamba
         self.local_depth = config.get('as_mamba', {}).get('local_depth', 4)    # Depth for local Mamba
         
+        self.use_checkpoint = config.get('as_mamba', {}).get('use_checkpoint', False)
+        
         # debug
-        print(f"[DEBUG] AS_Mamba.__init__:")
-        print(f"  - d_model_c: {self.d_model_c}")
-        print(f"  - Creating coarse_adapter: Conv2d(160 -> {self.d_model_c})")
+        logger.info(f"[DEBUG] AS_Mamba initializattion:")
+        logger.info(f"  - d_model_c: {self.d_model_c}")
+        logger.info(f"  - Creating coarse_adapter: Conv2d(160 -> {self.d_model_c})")
+        logger.info(f"  - n_blocks: {self.n_blocks}")
+        logger.info(f"  - global_depth: {self.global_depth}")
+        logger.info(f"  - local_depth: {self.local_depth}")
+        logger.info(f"  - use_checkpoint: {self.use_checkpoint}")
         
         self.coarse_adapter = nn.Conv2d(160, self.d_model_c, kernel_size=1)
         
@@ -78,7 +86,8 @@ class AS_Mamba(nn.Module):
                 global_depth=self.global_depth,
                 local_depth=self.local_depth,
                 dropout=0.1,
-                use_kan_flow=self.use_kan_flow
+                use_kan_flow=self.use_kan_flow,
+                use_checkpoint = self.use_checkpoint
             )
             for _ in range(self.n_blocks)
         ])
@@ -103,6 +112,8 @@ class AS_Mamba(nn.Module):
         
         # Optional: Geometry-aware fine matching (future extension)
         self.use_geom_for_fine = config.get('as_mamba', {}).get('use_geom_for_fine', False)
+        
+        self.use_checkpoint = config.get('as_mamba', {}).get('use_checkpoint', False)
 
     def coarse_match(self, data):
         """
@@ -148,7 +159,12 @@ class AS_Mamba(nn.Module):
 
         with self.profiler.profile("mamba initializer"):
             # Initial global feature interaction with Multi-Head Mamba
-            self.mamba_initializer(data)
+            # self.mamba_initializer(data)
+            if self.use_checkpoint and self.training:
+                # Gradient checkpointing
+                checkpoint(self.mamba_initializer, data)
+            else:
+                self.mamba_initializer(data)
             # Now data contains both feat_8_0/1 (matching) and feat_geom_0/1 (geometry)
 
         # with self.profiler.profile("as-mamba blocks"):
@@ -164,7 +180,12 @@ class AS_Mamba(nn.Module):
         # Iterative refinement through AS-Mamba blocks
         for block_idx, as_block in enumerate(self.as_mamba_blocks):
             with self.profiler.profile(f"as-mamba block {block_idx}"):
-                data = as_block(data)
+                if self.use_checkpoint and self.training:
+                    # Gradient checkpointing
+                    data = checkpoint(as_block, data)
+                else:
+                    data = as_block(data)
+                # data = as_block(data)
                 
                 # FIXED: Properly collect and store flow predictions
                 if 'flow_map' in data:

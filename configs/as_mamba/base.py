@@ -10,9 +10,13 @@ _CN = CN()
 ##############  ↓  AS-MAMBA Architecture  ↓  ##############
 _CN.AS_MAMBA = CN()
 
+## Memory optimizations
+_CN.AS_MAMBA.USE_CHECKPOINT = True
+_CN.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
+
 # Resolution settings (coarse_scale, fine_scale)
 _CN.AS_MAMBA.RESOLUTION = (8, 2)
-_CN.AS_MAMBA.FINE_WINDOW_SIZE = 5
+_CN.AS_MAMBA.FINE_WINDOW_SIZE = 4
 
 # Model dimensions
 _CN.AS_MAMBA.COARSE = CN()
@@ -60,6 +64,7 @@ _CN.AS_MAMBA.LOSS.NEG_WEIGHT = 1.0
 # Performance
 _CN.AS_MAMBA.MP = False  # Mixed precision
 _CN.AS_MAMBA.EVAL_TIMES = 1
+_CN.AS_MAMBA.USE_CHECKPOINT = True
 
 ##############  Dataset  ##############
 _CN.DATASET = CN()
@@ -77,7 +82,7 @@ _CN.DATASET.MGDPT_DF = 8
 ##############  Trainer  ##############
 _CN.TRAINER = CN()
 _CN.TRAINER.WORLD_SIZE = 1
-_CN.TRAINER.CANONICAL_BS = 2
+_CN.TRAINER.CANONICAL_BS = 1
 _CN.TRAINER.CANONICAL_LR = 1e-4
 _CN.TRAINER.SCALING = None
 _CN.TRAINER.FIND_LR = False

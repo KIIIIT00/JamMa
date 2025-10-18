@@ -39,12 +39,14 @@ class AS_Mamba_Block(nn.Module):
         local_depth: int = 4,
         dropout: float = 0.1,
         use_kan_flow: bool = False,
-        window_size: int = 12
+        window_size: int = 12,
+        use_checkpoint: bool = False
     ):
         super().__init__()
         self.d_model = d_model
         self.d_geom = d_geom
-        
+        self.use_checkpoint = use_checkpoint
+
         self.flow_predictor = FlowPredictor(
             d_model=d_model,
             d_geom=d_geom,
@@ -87,60 +89,215 @@ class AS_Mamba_Block(nn.Module):
         self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
         self.upsample_match = nn.ConvTranspose2d(d_model, d_model, kernel_size=2, stride=2)
         self.upsample_geom = nn.ConvTranspose2d(d_geom, d_geom, kernel_size=2, stride=2)
-        
+
     def forward(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Forward pass - unchanged, working correctly."""
-        # Extract features
+        # # Extract features
+        # feat_match_0 = data['feat_8_0'].view(data['bs'], self.d_model, data['h_8'], data['w_8'])
+        # feat_match_1 = data['feat_8_1'].view(data['bs'], self.d_model, data['h_8'], data['w_8'])
+        
+        # Geometric features
+        # if 'feat_geom_0' in data:
+        #     feat_geom_0 = data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8'], data['w_8'])
+        #     feat_geom_1 = data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8'], data['w_8'])
+        # else:
+        #     feat_geom_0 = torch.zeros(data['bs'], self.d_geom, data['h_8'], data['w_8'], 
+        #                              device=feat_match_0.device, dtype=feat_match_0.dtype)
+        #     feat_geom_1 = torch.zeros_like(feat_geom_0)
+        
+        # # Flow prediction
+        # feat_match_concat = torch.cat([feat_match_0, feat_match_1], dim=0)
+        # feat_geom_concat = torch.cat([feat_geom_0, feat_geom_1], dim=0)
+        
+        # flow_output = self.flow_predictor(feat_match_concat, feat_geom_concat)
+        # flow_map = flow_output['flow_with_uncertainty']
+        
+        # # Split flow maps (FIXED)
+        # flow_map_0 = flow_map[:data['bs']]
+        # flow_map_1 = flow_map[data['bs']:]
+        
+        # adaptive_spans_x, adaptive_spans_y = self.span_computer(
+        #     flow_output['flow'],
+        #     flow_output['uncertainty']
+        # )
+        
+        # # Global path
+        # global_data = {
+        #     'feat_8_0': self.downsample(feat_match_0),
+        #     'feat_8_1': self.downsample(feat_match_1),
+        #     'bs': data['bs'],
+        #     'h_8': data['h_8'] // 2,
+        #     'w_8': data['w_8'] // 2
+        # }
+        
+        # self.global_mamba(global_data)
+        
+        # global_match_0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        # global_match_1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        # global_geom_0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        # global_geom_1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        
+        # global_match_0 = self.upsample_match(global_match_0)
+        # global_match_1 = self.upsample_match(global_match_1)
+        # global_geom_0 = self.upsample_geom(global_geom_0)
+        # global_geom_1 = self.upsample_geom(global_geom_1)
+        
+        # # Split adaptive spans
+        # if adaptive_spans_x.shape[0] == 2 * data['bs']:
+        #     spans_x_0 = adaptive_spans_x[:data['bs']]
+        #     spans_y_0 = adaptive_spans_y[:data['bs']]
+        #     spans_x_1 = adaptive_spans_x[data['bs']:]
+        #     spans_y_1 = adaptive_spans_y[data['bs']:]
+        # else:
+        #     spans_x_0 = spans_x_1 = adaptive_spans_x
+        #     spans_y_0 = spans_y_1 = adaptive_spans_y
+        
+        # # Local path (FIXED: with flow_map parameters)
+        # local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
+        #     feat_match_0, feat_match_1,
+        #     feat_geom_0, feat_geom_1,
+        #     flow_map_0, flow_map_1,
+        #     spans_x_0, spans_y_0,
+        #     spans_x_1, spans_y_1
+        # )
+        
+        # # Feature fusion
+        # combined_match_0 = torch.stack([global_match_0, local_match_0, feat_match_0], dim=1)
+        # combined_match_1 = torch.stack([global_match_1, local_match_1, feat_match_1], dim=1)
+        
+        # updated_match_0 = self.feature_fusion(combined_match_0)
+        # updated_match_1 = self.feature_fusion(combined_match_1)
+        
+        # updated_geom_0 = (global_geom_0 + local_geom_0) / 2
+        # updated_geom_1 = (global_geom_1 + local_geom_1) / 2
+        
+        # data.update({
+        #     'feat_8_0': updated_match_0.flatten(2, 3),
+        #     'feat_8_1': updated_match_1.flatten(2, 3),
+        #     'feat_geom_0': updated_geom_0.flatten(2, 3),
+        #     'feat_geom_1': updated_geom_1.flatten(2, 3),
+        #     'flow_map': flow_map,
+        #     'adaptive_spans': (adaptive_spans_x, adaptive_spans_y)
+        # })
+        
+        # return data
+        # ============================================
+        # Step 1: Feature extraction (no optimization needed - views only)
+        # ============================================
         feat_match_0 = data['feat_8_0'].view(data['bs'], self.d_model, data['h_8'], data['w_8'])
         feat_match_1 = data['feat_8_1'].view(data['bs'], self.d_model, data['h_8'], data['w_8'])
         
-        # Geometric features
+        # ============================================
+        # Step 2: Geometric features - OPTIMIZATION 1
+        # ============================================
         if 'feat_geom_0' in data:
             feat_geom_0 = data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8'], data['w_8'])
             feat_geom_1 = data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8'], data['w_8'])
         else:
-            feat_geom_0 = torch.zeros(data['bs'], self.d_geom, data['h_8'], data['w_8'], 
-                                     device=feat_match_0.device, dtype=feat_match_0.dtype)
-            feat_geom_1 = torch.zeros_like(feat_geom_0)
+            # Optimization: 
+            if not hasattr(self, '_geom_buffer'):
+                self._geom_buffer = torch.zeros(
+                    data['bs'], self.d_geom, data['h_8'], data['w_8'],
+                    device=feat_match_0.device, dtype=feat_match_0.dtype
+                )
+            feat_geom_0 = self._geom_buffer
+            feat_geom_1 = self._geom_buffer  
         
-        # Flow prediction
-        feat_match_concat = torch.cat([feat_match_0, feat_match_1], dim=0)
-        feat_geom_concat = torch.cat([feat_geom_0, feat_geom_1], dim=0)
+        # ============================================
+        # Step 3: Flow prediction - OPTIMIZATION 2 (Gradient Checkpointing)
+        # ============================================
+        if self.use_checkpoint and self.training:
+            # Gradient checkpointing for flow prediction
+            def flow_forward(fm0, fm1, fg0, fg1):
+                feat_match_concat = torch.cat([fm0, fm1], dim=0)
+                feat_geom_concat = torch.cat([fg0, fg1], dim=0)
+                return self.flow_predictor(feat_match_concat, feat_geom_concat)
+            
+            flow_output = checkpoint(flow_forward, feat_match_0, feat_match_1, feat_geom_0, feat_geom_1)
+        else:
+            # Normal forward
+            feat_match_concat = torch.cat([feat_match_0, feat_match_1], dim=0)
+            feat_geom_concat = torch.cat([feat_geom_0, feat_geom_1], dim=0)
+            flow_output = self.flow_predictor(feat_match_concat, feat_geom_concat)
         
-        flow_output = self.flow_predictor(feat_match_concat, feat_geom_concat)
         flow_map = flow_output['flow_with_uncertainty']
         
-        # Split flow maps (FIXED)
+        # Optimization
+        if self.training:
+            del feat_match_concat, feat_geom_concat
+        
+        # Split flow maps
         flow_map_0 = flow_map[:data['bs']]
         flow_map_1 = flow_map[data['bs']:]
         
+        # Compute adaptive spans
         adaptive_spans_x, adaptive_spans_y = self.span_computer(
             flow_output['flow'],
             flow_output['uncertainty']
         )
         
-        # Global path
-        global_data = {
-            'feat_8_0': self.downsample(feat_match_0),
-            'feat_8_1': self.downsample(feat_match_1),
-            'bs': data['bs'],
-            'h_8': data['h_8'] // 2,
-            'w_8': data['w_8'] // 2
-        }
+        # ============================================
+        # Step 4: Global path - OPTIMIZATION 3 (Gradient Checkpointing)
+        # ============================================
+        if self.use_checkpoint and self.training:
+            # Gradient checkpointing for global path
+            def global_forward(fm0, fm1):
+                # Downsample
+                fm0_ds = self.downsample(fm0)
+                fm1_ds = self.downsample(fm1)
+                
+                # Create data dict
+                global_data = {
+                    'feat_8_0': fm0_ds,
+                    'feat_8_1': fm1_ds,
+                    'bs': data['bs'],
+                    'h_8': data['h_8'] // 2,
+                    'w_8': data['w_8'] // 2
+                }
+                
+                # Global mamba
+                self.global_mamba(global_data)
+                
+                # Extract and upsample
+                gm0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+                gm1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+                gg0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+                gg1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+                
+                gm0 = self.upsample_match(gm0)
+                gm1 = self.upsample_match(gm1)
+                gg0 = self.upsample_geom(gg0)
+                gg1 = self.upsample_geom(gg1)
+                
+                return gm0, gm1, gg0, gg1
+            
+            global_match_0, global_match_1, global_geom_0, global_geom_1 = \
+                checkpoint(global_forward, feat_match_0, feat_match_1)
+        else:
+            # Normal forward (existing code)
+            global_data = {
+                'feat_8_0': self.downsample(feat_match_0),
+                'feat_8_1': self.downsample(feat_match_1),
+                'bs': data['bs'],
+                'h_8': data['h_8'] // 2,
+                'w_8': data['w_8'] // 2
+            }
+            
+            self.global_mamba(global_data)
+            
+            global_match_0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+            global_match_1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+            global_geom_0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+            global_geom_1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+            
+            global_match_0 = self.upsample_match(global_match_0)
+            global_match_1 = self.upsample_match(global_match_1)
+            global_geom_0 = self.upsample_geom(global_geom_0)
+            global_geom_1 = self.upsample_geom(global_geom_1)
         
-        self.global_mamba(global_data)
-        
-        global_match_0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-        global_match_1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-        global_geom_0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
-        global_geom_1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
-        
-        global_match_0 = self.upsample_match(global_match_0)
-        global_match_1 = self.upsample_match(global_match_1)
-        global_geom_0 = self.upsample_geom(global_geom_0)
-        global_geom_1 = self.upsample_geom(global_geom_1)
-        
-        # Split adaptive spans
+        # ============================================
+        # Step 5: Split adaptive spans
+        # ============================================
         if adaptive_spans_x.shape[0] == 2 * data['bs']:
             spans_x_0 = adaptive_spans_x[:data['bs']]
             spans_y_0 = adaptive_spans_y[:data['bs']]
@@ -150,25 +307,63 @@ class AS_Mamba_Block(nn.Module):
             spans_x_0 = spans_x_1 = adaptive_spans_x
             spans_y_0 = spans_y_1 = adaptive_spans_y
         
-        # Local path (FIXED: with flow_map parameters)
-        local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
-            feat_match_0, feat_match_1,
-            feat_geom_0, feat_geom_1,
-            flow_map_0, flow_map_1,
-            spans_x_0, spans_y_0,
-            spans_x_1, spans_y_1
-        )
+        # ============================================
+        # Step 6: Local path - OPTIMIZATION 4 (Gradient Checkpointing + Memory Release)
+        # ============================================
+        if self.use_checkpoint and self.training:
+            # Gradient checkpointing for local path
+            local_match_0, local_match_1, local_geom_0, local_geom_1 = checkpoint(
+                self.local_mamba,
+                feat_match_0, feat_match_1,
+                feat_geom_0, feat_geom_1,
+                flow_map_0, flow_map_1,
+                spans_x_0, spans_y_0,
+                spans_x_1, spans_y_1
+            )
+        else:
+            local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
+                feat_match_0, feat_match_1,
+                feat_geom_0, feat_geom_1,
+                flow_map_0, flow_map_1,
+                spans_x_0, spans_y_0,
+                spans_x_1, spans_y_1
+            )
         
-        # Feature fusion
+        # Optimization:
+        if self.training:
+            del flow_map_0, flow_map_1, flow_output
+            # torch.cuda.empty_cache()  
+        
+        # ============================================
+        # Step 7: Feature fusion - OPTIMIZATION 5 (In-place operations)
+        # ============================================
+        # Stack features
         combined_match_0 = torch.stack([global_match_0, local_match_0, feat_match_0], dim=1)
         combined_match_1 = torch.stack([global_match_1, local_match_1, feat_match_1], dim=1)
         
+        # Optimization:
+        if self.training:
+            del global_match_0, global_match_1, local_match_0, local_match_1
+        
+        # Fusion
         updated_match_0 = self.feature_fusion(combined_match_0)
         updated_match_1 = self.feature_fusion(combined_match_1)
         
-        updated_geom_0 = (global_geom_0 + local_geom_0) / 2
-        updated_geom_1 = (global_geom_1 + local_geom_1) / 2
+        # Optimization: combined を削除
+        if self.training:
+            del combined_match_0, combined_match_1
         
+        # ============================================
+        # Step 8: Geometric fusion - OPTIMIZATION 6 (In-place)
+        # ============================================
+        # updated_geom_0 = (global_geom_0 + local_geom_0) / 2
+        # Optimization（in-place）:
+        updated_geom_0 = global_geom_0.add_(local_geom_0).mul_(0.5)
+        updated_geom_1 = global_geom_1.add_(local_geom_1).mul_(0.5)
+        
+        # ============================================
+        # Step 9: Update data and return
+        # ============================================
         data.update({
             'feat_8_0': updated_match_0.flatten(2, 3),
             'feat_8_1': updated_match_1.flatten(2, 3),
@@ -179,6 +374,7 @@ class AS_Mamba_Block(nn.Module):
         })
         
         return data
+    
 
 
 class FeatureFusionFFN(nn.Module):
@@ -249,7 +445,8 @@ class LocalAdaptiveMamba(nn.Module):
         
         from .mamba_module import create_multihead_block
         
-        self.span_groups = [5, 7, 9, 11, 15]
+        # self.span_groups = [5, 7, 9, 11, 15]
+        self.span_groups = [5, 9, 15]
         # self.mamba_blocks = nn.ModuleDict({
         #     f'span_{s}': nn.ModuleList([
         #         create_multihead_block(
@@ -271,7 +468,7 @@ class LocalAdaptiveMamba(nn.Module):
                     rms_norm=True,
                     residual_in_fp32=True,
                     layer_idx=i,
-                    block_type='dual_input'  # ← この行を追加！
+                    block_type='dual_input'  
                 )
                 for i in range(depth)
             ])
@@ -337,9 +534,12 @@ class LocalAdaptiveMamba(nn.Module):
         # FIX 1: Initialize position assignment tracker
         position_assigned = torch.zeros(B, H, W, dtype=torch.bool, device=device)
         
-        output_match_list = []
-        output_geom_list = []
-        
+        # output_match_list = []
+        # output_geom_list = []
+        output_match = torch.zeros(B, C, H, W, device=device, dtype=feat_match.dtype)
+        output_geom = torch.zeros(B, self.d_geom, H, W, device=device, dtype=feat_geom.dtype)
+        weight_sum = torch.zeros(B, 1, H, W, device=device, dtype=feat_match.dtype)
+                
         # Process span groups in order of priority (larger spans first)
         # Rationale: Larger spans provide more context, process first
         for span_size in sorted(self.span_groups, reverse=True):
@@ -367,29 +567,90 @@ class LocalAdaptiveMamba(nn.Module):
                 # FIX 3: Apply dropout consistently to both
                 windows_match = self.dropout(windows_match)
                 windows_geom = self.dropout(windows_geom)
-
-            output_match_list.append((windows_match, window_positions, span_size))
-            output_geom_list.append((windows_geom, window_positions, span_size))
-
-            # FIX: in-place
-            new_assigned = position_assigned.clone()
-            for _, y, x in window_positions:
-                new_assigned[:, y, x] = True
-            position_assigned = new_assigned
             
-            # FIX 4: Mark positions as assigned
+            self._accumulate_windows(
+                output_match, output_geom, weight_sum,
+                windows_match, windows_geom,
+                window_positions, span_size,
+                H, W
+            )
+            
+            # CRITICAL: Free memory immediately
+            del windows_match, windows_geom
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Update assigned positions
             for _, y, x in window_positions:
                 position_assigned[:, y, x] = True
+
+        #     output_match_list.append((windows_match, window_positions, span_size))
+        #     output_geom_list.append((windows_geom, window_positions, span_size))
+
+        #     # FIX: in-place
+        #     new_assigned = position_assigned.clone()
+        #     for _, y, x in window_positions:
+        #         new_assigned[:, y, x] = True
+        #     position_assigned = new_assigned
+            
+        #     # FIX 4: Mark positions as assigned
+        #     for _, y, x in window_positions:
+        #         position_assigned[:, y, x] = True
         
-        # Aggregate with improved method
-        output_match = self._aggregate_multispan_outputs_fixed(
-            output_match_list, (B, C, H, W)
-        )
-        output_geom = self._aggregate_multispan_outputs_fixed(
-            output_geom_list, (B, self.d_geom, H, W)
-        )
+        # # Aggregate with improved method
+        # output_match = self._aggregate_multispan_outputs_fixed(
+        #     output_match_list, (B, C, H, W)
+        # )
+        # output_geom = self._aggregate_multispan_outputs_fixed(
+        #     output_geom_list, (B, self.d_geom, H, W)
+        # )
+        
+        # Normalize
+        weight_sum = torch.clamp(weight_sum, min=1e-6)
+        output_match.div_(weight_sum)
+        output_geom.div_(weight_sum)
         
         return {'match': output_match, 'geom': output_geom}
+    
+    def _accumulate_windows(
+        self,
+        output_match: torch.Tensor,
+        output_geom: torch.Tensor,
+        weight_sum: torch.Tensor,
+        windows_match: torch.Tensor,
+        windows_geom: torch.Tensor,
+        window_positions: torch.Tensor,
+        span_size: int,
+        H: int,
+        W: int
+    ):
+        """Accumulate window results directly to output buffer."""
+        half_size = span_size // 2
+        
+        # Create offset grid
+        offset_y, offset_x = torch.meshgrid(
+            torch.arange(-half_size, half_size + 1, device=output_match.device),
+            torch.arange(-half_size, half_size + 1, device=output_match.device),
+            indexing='ij'
+        )
+        offsets = torch.stack([offset_y.flatten(), offset_x.flatten()], dim=-1)
+        
+        # Distance-based weights
+        distances = torch.sqrt((offsets.float() ** 2).sum(dim=-1))
+        pixel_weights = torch.exp(-distances / (span_size / 2.0))
+        pixel_weights = pixel_weights / pixel_weights.sum()
+        
+        # Accumulate
+        for i, (b, center_y, center_x) in enumerate(window_positions):
+            for j, (dy, dx) in enumerate(offsets):
+                y = center_y + dy
+                x = center_x + dx
+                
+                if 0 <= y < H and 0 <= x < W:
+                    w = pixel_weights[j]
+                    output_match[b, :, y, x] += windows_match[i, j] * w
+                    output_geom[b, :, y, x] += windows_geom[i, j] * w
+                    weight_sum[b, 0, y, x] += w
     
     def _get_span_group_mask(
         self,

@@ -16,7 +16,7 @@ _CN.AS_MAMBA.FINE_WINDOW_SIZE = 5  # Window size for fine-level matching
 
 # Model architecture
 _CN.AS_MAMBA.COARSE = CN()
-_CN.AS_MAMBA.COARSE.D_MODEL = 256  # Dimension of coarse features
+_CN.AS_MAMBA.COARSE.D_MODEL = 96  # Dimension of coarse features
 
 _CN.AS_MAMBA.FINE = CN()
 _CN.AS_MAMBA.FINE.D_MODEL = 64  # Dimension of fine features
@@ -80,6 +80,10 @@ _CN.AS_MAMBA.LOSS.MULTISCALE_WEIGHT = 1.0
 # Performance settings
 _CN.AS_MAMBA.MP = False  # Mixed precision training
 _CN.AS_MAMBA.EVAL_TIMES = 1  # Number of evaluation runs
+
+## Memory optimizations
+_CN.AS_MAMBA.USE_CHECKPOINT = True
+_CN.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
 
 ##############  Dataset (same as JamMa)  ##############
 
