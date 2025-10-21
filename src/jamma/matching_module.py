@@ -97,7 +97,7 @@ class CoarseMatching(nn.Module):
         if mask_c0 is not None:
             sim_matrix.masked_fill_(
                 ~(mask_c0[..., None] * mask_c1[:, None]).bool(),
-                -INF)
+                torch.finfo(sim_matrix.dtype).min)
         if self.inference:
             # predict coarse matches from conf_matrix
             data.update(**self.get_coarse_match_inference(sim_matrix, data))

@@ -32,7 +32,7 @@ Usage:
         --num_workers 4 \
         --max_epochs 30
 """
-
+import torch
 import math
 import argparse
 import pprint
@@ -54,6 +54,22 @@ from src.lightning.lightning_as_mamba import PL_ASMamba
 
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
 
+def train_step_with_memory_logging(self, batch, batch_idx):
+    if batch_idx % 10 == 0:
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+        
+        memory_stats = torch.cuda.memory_stats()
+        active_bytes = memory_stats["active_bytes.all.current"] / 1024**3
+        
+        loguru_logger.info(f"GPU Memory Stats [Step {self.global_step}]: "
+                   f"Allocated: {allocated:.2f} GB, "
+                   f"Reserved: {reserved:.2f} GB, "
+                   f"Max Allocated: {max_allocated:.2f} GB, "
+                   f"Active: {active_bytes:.2f} GB")
+        
+    return super().training_step(batch, batch_idx)
 
 def parse_args():
     parser = argparse.ArgumentParser(

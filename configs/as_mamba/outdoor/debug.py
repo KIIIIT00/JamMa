@@ -5,9 +5,9 @@ Debug configuration for AS-Mamba (Outdoor/MegaDepth)
 from configs.as_mamba.base import cfg
 
 # Reduced model for debugging
-cfg.AS_MAMBA.N_BLOCKS = 2
-cfg.AS_MAMBA.GLOBAL_DEPTH = 2
-cfg.AS_MAMBA.LOCAL_DEPTH = 2
+cfg.AS_MAMBA.N_BLOCKS = 4
+cfg.AS_MAMBA.GLOBAL_DEPTH = 4
+cfg.AS_MAMBA.LOCAL_DEPTH = 4
 cfg.AS_MAMBA.MP = True
 
 ## Memory optimizations

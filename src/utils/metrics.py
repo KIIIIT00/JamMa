@@ -175,12 +175,12 @@ def compute_pose_errors(data, config):
 
     for bs in range(K0.shape[0]):
         mask = m_bids == bs
-        if config.JAMMA.EVAL_TIMES >= 1:
+        if config.AS_MAMBA.EVAL_TIMES >= 1:
             bpts0, bpts1 = pts0[mask], pts1[mask]
             R_list, T_list, inliers_list = [], [], []
             for _ in range(5):
                 shuffling = np.random.permutation(np.arange(len(bpts0)))
-                if _ >= config.JAMMA.EVAL_TIMES:
+                if _ >= config.AS_MAMBA.EVAL_TIMES:
                     continue
                 bpts0 = bpts0[shuffling]
                 bpts1 = bpts1[shuffling]
@@ -357,8 +357,8 @@ def aggregate_metrics_train_val(metrics, epi_err_thr=5e-4, config=None):
 
     # pose auc
     angular_thresholds = [5, 10, 20]
-    if config.JAMMA.EVAL_TIMES >= 1:
-        pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0).reshape(-1, config.JAMMA.EVAL_TIMES)[unq_ids].reshape(-1)
+    if config.AS_MAMBA.EVAL_TIMES >= 1:
+        pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0).reshape(-1, config.AS_MAMBA.EVAL_TIMES)[unq_ids].reshape(-1)
     else:
         pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0)[unq_ids]
     aucs = error_auc(pose_errors, angular_thresholds)  # (auc@5, auc@10, auc@20)
@@ -385,8 +385,8 @@ def aggregate_metrics_test(metrics, epi_err_thr=5e-4, config=None):
     # pose auc
     angular_thresholds = [5, 10, 20]
     # pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0)[unq_ids]
-    if config.JAMMA.EVAL_TIMES >= 1:
-        pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0).reshape(-1, config.JAMMA.EVAL_TIMES)[unq_ids].reshape(-1)
+    if config.AS_MAMBA.EVAL_TIMES >= 1:
+        pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0).reshape(-1, config.AS_MAMBA.EVAL_TIMES)[unq_ids].reshape(-1)
     else:
         pose_errors = np.max(np.stack([metrics['R_errs'], metrics['t_errs']]), axis=0)[unq_ids]
     aucs = error_auc(pose_errors, angular_thresholds)  # (auc@5, auc@10, auc@20)

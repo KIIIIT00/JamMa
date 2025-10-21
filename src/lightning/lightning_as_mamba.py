@@ -10,7 +10,6 @@ Key differences from JamMa:
 Author: Research Team
 Date: 2025
 """
-
 from collections import defaultdict
 import pprint
 from loguru import logger
@@ -207,8 +206,15 @@ class PL_ASMamba(pl.LightningModule):
             mode: 'train' or 'val'
         """
         # 1. Compute coarse-level supervision
+        print(f"DEBUG: Starting coarse supervision computation...")
+        print(f"DEBUG: Batch keys: {list(batch.keys())}")
+        print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
         with self.profiler.profile("Compute coarse supervision"):
             compute_supervision_coarse(batch, self.config)
+        print(f"DEBUG: Completed coarse supervision computation.")
+        print(f"DEBUG: Batch keys after coarse supervision: {list(batch.keys())}")
+        print(f"DEBUG: Batch conf_matrix_gt shape: {batch['conf_matrix_gt'].shape}")
+        print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
         
         # 2. CRITICAL: Compute flow supervision for AS-Mamba
         # This is unique to AS-Mamba - flow ground truth needed for adaptive spans
@@ -312,6 +318,21 @@ class PL_ASMamba(pl.LightningModule):
         if batch_idx % 10 == 0:
             allocated = torch.cuda.memory_allocated() / 1024**3
             reserved = torch.cuda.memory_reserved() / 1024**3
+            max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+            
+            logger.info(f"[Step {batch_idx}] GPU Memory:")
+            logger.info(f"  - Allocated: {allocated:.2f} GB")
+            logger.info(f"  - Reserved: {reserved:.2f} GB")
+            logger.info(f"  - Max Allocated: {max_allocated:.2f} GB")
+            
+            # メモリ効率の指標
+            efficiency = (allocated / reserved * 100) if reserved > 0 else 0
+            logger.info(f"  - Memory Efficiency: {efficiency:.1f}%")
+            
+            # 勾配のメモリ使用量
+            grad_memory = sum(p.grad.element_size() * p.grad.nelement() 
+                            for p in self.parameters() if p.grad is not None) / 1024**3
+            logger.info(f"  - Gradient Memory: {grad_memory:.3f} GB")
             logger.info(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
         self._trainval_inference(batch, mode='train')
         
@@ -393,35 +414,48 @@ class PL_ASMamba(pl.LightningModule):
             self.trainer.num_val_batches[0] // self.n_vals_plot, 1
         )
         figures = {self.config.TRAINER.PLOT_MODE: []}
+        if HAS_ASMAMBA_VIZ:
+            figures['flow'] = []
+            figures['adaptive_spans'] = []
         
         # Create visualizations for selected batches
         if batch_idx % val_plot_interval == 0 and self.trainer.global_rank == 0:
+            mode = self.config.TRAINER.PLOT_MODE
+            matching_figs_dict = make_matching_figures(
+                batch,
+                mode
+            )
+            if matching_figs_dict and mode in matching_figs_dict and matching_figs_dict[mode]:
+                fig_object = matching_figs_dict[mode][0] 
+                if fig_object is not None: 
+                    figures[mode] = [fig_object]
+                    print(f"DEBUG: Type from make_matching_figures: {type(fig_object)}")
             # Standard matching visualization
-            figures[self.config.TRAINER.PLOT_MODE] = [
-                make_matching_figures(
-                    batch,
-                    self.config.TRAINER.PLOT_MODE,
-                    return_fig=True
-                )
-            ]
+            # figures[self.config.TRAINER.PLOT_MODE] = [
+            #     make_matching_figures(
+            #         batch,
+            #         self.config.TRAINER.PLOT_MODE
+            #     )
+            # ]
             
             # AS-Mamba specific: Flow visualization
-            if 'predict_flow' in batch and len(batch['predict_flow']) > 0:
+            if HAS_ASMAMBA_VIZ and 'predict_flow' in batch and len(batch['predict_flow']) > 0:
                 flow_fig = make_flow_visualization(
                     batch,
-                    block_idx=-1,  # Last block
-                    return_fig=True
+                    block_idx=-1  # Last block
                 )
+                print(f"DEBUG: Type from make_flow_visualization: {type(flow_fig)}")
                 figures['flow'] = [flow_fig]
             
             # AS-Mamba specific: Adaptive span visualization
-            if 'adaptive_spans' in batch:
+            if HAS_ASMAMBA_VIZ and 'adaptive_spans' in batch:
                 span_fig = make_adaptive_span_visualization(
-                    batch,
-                    return_fig=True
+                    batch
                 )
+                print(f"DEBUG: Type from make_adaptive_span_visualization: {type(span_fig)}")
                 figures['adaptive_spans'] = [span_fig]
         
+        print(f"DEBUG VAL_STEP (batch {batch_idx}): Final figures dict being returned: {figures}")
         return {
             **ret_dict,
             'loss_scalars': batch['loss_scalars'],
@@ -469,11 +503,24 @@ class PL_ASMamba(pl.LightningModule):
                 )
             
             # 3. Aggregate figures
-            _figures = [o['figures'] for o in outputs]
-            figures = {
-                k: flattenList(gather(flattenList([_me[k] for _me in _figures])))
-                for k in _figures[0]
-            }
+            # _figures = [o['figures'] for o in outputs]
+            # figures = {
+            #     k: flattenList(gather(flattenList([_me[k] for _me in _figures])))
+            #     for k in _figures[0]
+            # }
+            aggregated_figures = defaultdict(list)
+            # validation_step から返された辞書のリスト (outputs) をループ
+            for output_dict in outputs:
+                # 各ステップの 'figures' 辞書を取得
+                step_figures = output_dict.get('figures', {})
+                # 'figures' 辞書のキーと値 (Figureのリスト) をループ
+                for key, fig_list in step_figures.items():
+                    # 対応するキーのリストに Figure を追加 (extend)
+                    if fig_list: # 空リストは追加しない
+                        aggregated_figures[key].extend(fig_list)
+
+            figures = dict(aggregated_figures)
+            print(f"DEBUG VAL_EPOCH_END: Figures structure AFTER aggregation:\n{figures}")
             
             # Log to tensorboard (rank 0 only)
             if self.trainer.global_rank == 0:
@@ -498,6 +545,10 @@ class PL_ASMamba(pl.LightningModule):
                 for k, v in figures.items():
                     for plot_idx, fig in enumerate(v):
                         if fig is not None:
+                            print(f"DEBUG: Adding figure for key='{k}', plot_idx={plot_idx}")
+                            print(f"DEBUG: Type of fig: {type(fig)}")
+                            if isinstance(fig, dict):
+                                print(f"DEBUG: Content of fig (dict): {fig}")
                             self.logger.experiment.add_figure(
                                 f'val_match_{valset_idx}/{k}/pair-{plot_idx}',
                                 fig,

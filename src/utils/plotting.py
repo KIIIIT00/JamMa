@@ -100,7 +100,8 @@ def make_evaluation_figure_color(data, b_id, alpha='dynamic', path=None, dpi=150
     if alpha == 'dynamic':
         alpha = dynamic_alpha(len(correct_mask))
     color = error_colormap(epi_errs, conf_thr, alpha=alpha)
-    runtime = data['runtime']
+    # runtime = data['runtime']
+    runtime = data.get('runtime', False)
     text = [
         f'#Matches {len(kpts0)}',
         f'Precision({conf_thr:.2e}) ({100 * precision:.1f}%): {n_correct}/{len(kpts0)}',
@@ -438,11 +439,11 @@ def make_flow_visualization(data, block_idx=-1, path=None, return_fig=False):
             plt.savefig(str(path), dpi=100, bbox_inches='tight')
             plt.close()
             return None
-        elif return_fig:
-            return fig
+        # elif return_fig:
+        #     return fig
         else:
-            plt.show()
-            return None
+            # plt.show()
+            return fig
             
     except Exception as e:
         print(f"Warning: Could not create flow visualization: {e}")
@@ -507,11 +508,8 @@ def make_adaptive_span_visualization(data, path=None, return_fig=False):
             plt.savefig(str(path), dpi=100, bbox_inches='tight')
             plt.close()
             return None
-        elif return_fig:
-            return fig
         else:
-            plt.show()
-            return None
+            return fig
             
     except Exception as e:
         print(f"Warning: Could not create adaptive span visualization: {e}")

@@ -16,6 +16,7 @@ Author: Research Team
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 from typing import Dict, Optional, Tuple
 
