@@ -255,9 +255,9 @@ def compute_supervision_flow(data, config):
     bs = data['conf_matrix_gt'].shape[0]
     h0, w0 = data['hw0_c']
     h1, w1 = data['hw1_c']
-    print(f"DEBUG data hw0_c: {data['hw0_c']}")
-    print(f"DEBUG data hw1_c: {data['hw1_c']}")
-    print(f"DEBUG: h0 h1: {h0}, {h1}")
+    # print(f"DEBUG data hw0_c: {data['hw0_c']}")
+    # print(f"DEBUG data hw1_c: {data['hw1_c']}")
+    # print(f"DEBUG: h0 h1: {h0}, {h1}")
     
     device = data['conf_matrix_gt'].device
     
@@ -293,26 +293,26 @@ def compute_supervision_flow(data, config):
     
     # Compute flow ground truth
     # Flow is the displacement from source position to target position
-    print(f"DEBUG: type bs: {type(bs)}")
-    print(f"DEBUG: type h0: {type(h0)}")
-    print(f"DEBUG: h0: {h0}")
-    print(f"DEBUG: type w1: {type(w1)}")
-    print(f"DEBUG: w1: {w1}")
+    # print(f"DEBUG: type bs: {type(bs)}")
+    # print(f"DEBUG: type h0: {type(h0)}")
+    # print(f"DEBUG: h0: {h0}")
+    # print(f"DEBUG: type w1: {type(w1)}")
+    # print(f"DEBUG: w1: {w1}")
 
     h0 = h0[0].long()
     w0 = w0[0].long()
     h1 = h1[0].long()
     w1 = w1[0].long()
 
-    print(f"DEBUG: type bs: {type(bs)}")
-    print(f"DEBUG: type h0: {type(h0)}")
-    print(f"DEBUG: h0: {h0}")
-    print(f"DEBUG: type h1: {type(h1)}")
-    print(f"DEBUG h1: {h1}")
-    print(f"DEBUG: type w0: {type(w0)}")
-    print(f"DEBUG: w0: {w0}")
-    print(f"DEBUG: type w1: {type(w1)}")
-    print(f"DEBUG w1: {w1}")
+    # print(f"DEBUG: type bs: {type(bs)}")
+    # print(f"DEBUG: type h0: {type(h0)}")
+    # print(f"DEBUG: h0: {h0}")
+    # print(f"DEBUG: type h1: {type(h1)}")
+    # print(f"DEBUG h1: {h1}")
+    # print(f"DEBUG: type w0: {type(w0)}")
+    # print(f"DEBUG: w0: {w0}")
+    # print(f"DEBUG: type w1: {type(w1)}")
+    # print(f"DEBUG w1: {w1}")
     flow_gt_0to1 = torch.zeros(bs, h0, w0, 2, device=device, dtype=torch.float32)
     flow_gt_1to0 = torch.zeros(bs, h1, w1, 2, device=device, dtype=torch.float32)
     
@@ -333,7 +333,7 @@ def compute_supervision_flow(data, config):
         # Flow from i to j (0 -> 1)
         flow_x = j_x.float() - i_x.float()
         flow_y = j_y.float() - i_y.float()
-        print(f"flow_x: {flow_x}, flow_y: {flow_y}")
+        # print(f"flow_x: {flow_x}, flow_y: {flow_y}")
         flow_gt_0to1[b, i_y, i_x, 0] = flow_x
         flow_gt_0to1[b, i_y, i_x, 1] = flow_y
         

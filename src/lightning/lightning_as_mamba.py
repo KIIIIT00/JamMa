@@ -206,15 +206,15 @@ class PL_ASMamba(pl.LightningModule):
             mode: 'train' or 'val'
         """
         # 1. Compute coarse-level supervision
-        print(f"DEBUG: Starting coarse supervision computation...")
-        print(f"DEBUG: Batch keys: {list(batch.keys())}")
-        print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
+        # print(f"DEBUG: Starting coarse supervision computation...")
+        # print(f"DEBUG: Batch keys: {list(batch.keys())}")
+        # print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
         with self.profiler.profile("Compute coarse supervision"):
             compute_supervision_coarse(batch, self.config)
-        print(f"DEBUG: Completed coarse supervision computation.")
-        print(f"DEBUG: Batch keys after coarse supervision: {list(batch.keys())}")
-        print(f"DEBUG: Batch conf_matrix_gt shape: {batch['conf_matrix_gt'].shape}")
-        print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
+        # print(f"DEBUG: Completed coarse supervision computation.")
+        # print(f"DEBUG: Batch keys after coarse supervision: {list(batch.keys())}")
+        # print(f"DEBUG: Batch conf_matrix_gt shape: {batch['conf_matrix_gt'].shape}")
+        # print(f"DEBUG: Batch hw0_c: {batch['hw0_c']}, hw1_c: {batch['hw1_c']}")
         
         # 2. CRITICAL: Compute flow supervision for AS-Mamba
         # This is unique to AS-Mamba - flow ground truth needed for adaptive spans
@@ -444,7 +444,7 @@ class PL_ASMamba(pl.LightningModule):
                     batch,
                     block_idx=-1  # Last block
                 )
-                print(f"DEBUG: Type from make_flow_visualization: {type(flow_fig)}")
+                # print(f"DEBUG: Type from make_flow_visualization: {type(flow_fig)}")
                 figures['flow'] = [flow_fig]
             
             # AS-Mamba specific: Adaptive span visualization
@@ -452,10 +452,10 @@ class PL_ASMamba(pl.LightningModule):
                 span_fig = make_adaptive_span_visualization(
                     batch
                 )
-                print(f"DEBUG: Type from make_adaptive_span_visualization: {type(span_fig)}")
+                # print(f"DEBUG: Type from make_adaptive_span_visualization: {type(span_fig)}")
                 figures['adaptive_spans'] = [span_fig]
         
-        print(f"DEBUG VAL_STEP (batch {batch_idx}): Final figures dict being returned: {figures}")
+        # print(f"DEBUG VAL_STEP (batch {batch_idx}): Final figures dict being returned: {figures}")
         return {
             **ret_dict,
             'loss_scalars': batch['loss_scalars'],
@@ -545,10 +545,10 @@ class PL_ASMamba(pl.LightningModule):
                 for k, v in figures.items():
                     for plot_idx, fig in enumerate(v):
                         if fig is not None:
-                            print(f"DEBUG: Adding figure for key='{k}', plot_idx={plot_idx}")
-                            print(f"DEBUG: Type of fig: {type(fig)}")
-                            if isinstance(fig, dict):
-                                print(f"DEBUG: Content of fig (dict): {fig}")
+                            # print(f"DEBUG: Adding figure for key='{k}', plot_idx={plot_idx}")
+                            # print(f"DEBUG: Type of fig: {type(fig)}")
+                            # if isinstance(fig, dict):
+                            #     print(f"DEBUG: Content of fig (dict): {fig}")
                             self.logger.experiment.add_figure(
                                 f'val_match_{valset_idx}/{k}/pair-{plot_idx}',
                                 fig,

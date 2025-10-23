@@ -8,7 +8,7 @@ EXP_NAME="as_mamba_indoor_$(date +%Y%m%d_%H%M%S)"
 GPUS=0
 BATCH_SIZE=2
 NUM_WORKERS=4
-MAX_EPOCHS=30
+MAX_EPOCHS=1
 
 echo "Experiment: $EXP_NAME"
 echo "GPUs: $GPUS"

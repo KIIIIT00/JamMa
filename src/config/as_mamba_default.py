@@ -28,10 +28,10 @@ _CN.AS_MAMBA.FINE.DSMAX_TEMPERATURE = 0.1
 # AS-Mamba specific configurations
 _CN.AS_MAMBA.N_BLOCKS = 3  # Number of AS-Mamba blocks
 _CN.AS_MAMBA.D_GEOM = 64  # Dimension of geometric features
-_CN.AS_MAMBA.USE_KAN_FLOW = False  # Use KAN for flow prediction (False = MLP)
+_CN.AS_MAMBA.USE_KAN_FLOW = True  # Use KAN for flow prediction (False = MLP)
 _CN.AS_MAMBA.GLOBAL_DEPTH = 4  # Number of Mamba layers in global path
 _CN.AS_MAMBA.LOCAL_DEPTH = 4  # Number of Mamba layers in local path
-_CN.AS_MAMBA.USE_GEOM_FOR_FINE = False  # Use geometric features in fine matching
+_CN.AS_MAMBA.USE_GEOM_FOR_FINE = True  # Use geometric features in fine matching
 
 # Flow predictor settings
 _CN.AS_MAMBA.FLOW = CN()
