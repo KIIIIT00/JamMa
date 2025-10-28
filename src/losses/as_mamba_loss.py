@@ -270,20 +270,23 @@ class ASMambaLoss(nn.Module):
         inverse_std = 1.0 / torch.clamp(std, min=1e-10)
         weight = (inverse_std / torch.mean(inverse_std)).detach()
 
-        if not correct_mask.any():
-            logger.warning("No correct fine matches - assigning dummy supervision")
-            expec_f_gt = torch.zeros(1, 2, device=expec_f.device)
-            expec_f = torch.zeros(1, 3, device=expec_f.device)
-            correct_mask = torch.ones(1, dtype=torch.bool, device=expec_f.device)
+        # if not correct_mask.any():
+        #     logger.warning("No correct fine matches - returning zero loss for fine-level (graph preserved).")
+            
+        #     # expec_f_gt = torch.zeros(1, 2, device=expec_f.device)
+        #     # expec_f = torch.zeros(1, 3, device=expec_f.device)
+        #     # correct_mask = torch.ones(1, dtype=torch.bool, device=expec_f.device)
+        #     return expec_f.sum() * 0.0
         
         if correct_mask.sum() == 0:
             if self.training:
-                logger.warning("No correct fine matches - assigning dummy supervision")
+                logger.warning("No correct fine matches - returning zero loss for fine-level (graph preserved).")
+                return (expec_f.sum() * 0.0) 
                 
-            if self.training:
-                logger.warning("No correct fine matches - assigning dummy supervision")
-                correct_mask[0] = True
-                weight[0] = 0.
+            # if self.training:
+            #     logger.warning("No correct fine matches - assigning dummy supervision")
+            #     correct_mask[0] = True
+            #     weight[0] = 0.
             else:
                 return None
         
@@ -310,7 +313,7 @@ class ASMambaLoss(nn.Module):
         
         if not correct_mask.any():
             if self.training:
-                logger.warning("No correct fine matches - assigning dummy supervision")
+                logger.warning("assign a false supervision to avoid ddp deadlock")
                 correct_mask[0] = True
                 weight[0] = 0.
             else:
@@ -320,7 +323,7 @@ class ASMambaLoss(nn.Module):
         flow_l2 = ((expec_f_gt[correct_mask] - expec_f[correct_mask, :2]) ** 2).sum(-1)
         loss = (flow_l2 * weight[correct_mask]).mean()
         
-        return flow_l2.mean()
+        return loss
     
     def compute_geometric_loss(self, geom_outputs_0, geom_outputs_1, conf_gt, weight):
         """
