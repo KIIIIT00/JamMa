@@ -50,6 +50,7 @@ class Loss(nn.Module):
                 pts0 (torch.Tensor): [N, 2]
                 E (torch.Tensor): [3, 3]
             """
+            
             pts0 = (pts0 - K0[:, [0, 1], [2, 2]]) / K0[:, [0, 1], [0, 1]]
             pts1 = (pts1 - K1[:, [0, 1], [2, 2]]) / K1[:, [0, 1], [0, 1]]
             pts0 = convert_points_to_homogeneous(pts0)

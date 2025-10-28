@@ -23,7 +23,7 @@ _CN.AS_MAMBA.FINE.D_MODEL = 64  # Dimension of fine features
 _CN.AS_MAMBA.FINE.TOP_K = 2
 _CN.AS_MAMBA.FINE.ACCEPT_SCORE = 0.2
 _CN.AS_MAMBA.FINE.ACCEPT_PEAKINESS = 0.95
-_CN.AS_MAMBA.FINE.DSMAX_TEMPERATURE = 0.1 
+_CN.AS_MAMBA.FINE.DSMAX_TEMPERATURE = 0.15
 
 # AS-Mamba specific configurations
 _CN.AS_MAMBA.N_BLOCKS = 3  # Number of AS-Mamba blocks
@@ -48,7 +48,7 @@ _CN.AS_MAMBA.ADAPTIVE_SPAN.TEMPERATURE = 1.0  # Temperature for span computation
 # Matching settings (inherited and extended from JamMa)
 _CN.AS_MAMBA.MATCH_COARSE = CN()
 _CN.AS_MAMBA.MATCH_COARSE.USE_SM = True  # Use softmax in matching
-_CN.AS_MAMBA.MATCH_COARSE.THR = 0.2  # Matching threshold
+_CN.AS_MAMBA.MATCH_COARSE.THR = 0.05  # Matching threshold
 _CN.AS_MAMBA.MATCH_COARSE.BORDER_RM = 2  # Border removal
 _CN.AS_MAMBA.MATCH_COARSE.DSMAX_TEMPERATURE = 0.1
 _CN.AS_MAMBA.MATCH_COARSE.SKH_ITERS = 3
@@ -82,7 +82,7 @@ _CN.AS_MAMBA.MP = False  # Mixed precision training
 _CN.AS_MAMBA.EVAL_TIMES = 1  # Number of evaluation runs
 
 ## Memory optimizations
-_CN.AS_MAMBA.USE_CHECKPOINT = True
+_CN.AS_MAMBA.USE_CHECKPOINT = False
 _CN.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
 
 ##############  Dataset (same as JamMa)  ##############
@@ -131,7 +131,7 @@ _CN.DATASET.MGDPT_DF = 8
 _CN.TRAINER = CN()
 _CN.TRAINER.WORLD_SIZE = 1
 _CN.TRAINER.CANONICAL_BS = 2
-_CN.TRAINER.CANONICAL_LR = 1e-4
+_CN.TRAINER.CANONICAL_LR = 1e-5
 _CN.TRAINER.SCALING = None
 _CN.TRAINER.FIND_LR = False
 
@@ -155,7 +155,7 @@ _CN.TRAINER.COSA_TMAX = 30
 _CN.TRAINER.ELR_GAMMA = 0.999992
 
 # Training settings
-_CN.TRAINER.GRADIENT_CLIPPING = 0.5
+_CN.TRAINER.GRADIENT_CLIPPING = 1.0
 _CN.TRAINER.SEED = 66
 
 # geometric metrics and pose solver

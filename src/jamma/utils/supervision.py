@@ -122,6 +122,160 @@ def spvs_coarse(data, config):
         'spv_pt1_i': grid_pt1_i
     })
 
+@torch.no_grad()
+def compute_fine_ground_truth(data, W_f):
+    """Computes ground truth offset 'expec_f_gt' in normalized coordinates [-1, 1]."""
+    # Check if necessary keys exist
+    required_keys = ['b_ids', 'i_ids', 'j_ids', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids',
+                     'spv_w_pt0_i', 'spv_pt1_i', 'hw0_c', 'hw1_c', 'hw0_f', 'hw1_f']
+    if not all(key in data for key in required_keys) or data['b_ids'].numel() == 0:
+        empty_gt = torch.empty(0, 2, device=data['b_ids'].device)
+        empty_mask = torch.empty(0, dtype=torch.bool, device=data['b_ids'].device)
+        return empty_gt, empty_mask # Return empty if M=0 or keys missing
+
+    M = data['b_ids'].shape[0]
+    device = data['b_ids'].device
+
+    # Get coarse match info corresponding to the M fine matches
+    b_ids_c, i_ids_c, j_ids_c = data['b_ids'], data['i_ids'], data['j_ids'] # Shape: (M,)
+
+    # Get sparse ground truth supervision points (image coordinates)
+    spv_b_ids, spv_i_ids, spv_j_ids = data['spv_b_ids'], data['spv_i_ids'], data['spv_j_ids']
+    spv_w_pt0_i, spv_pt1_i = data['spv_w_pt0_i'], data['spv_pt1_i'] # Shape: (N_gt, 2)
+
+    # Scale factors: coarse_feature -> fine_feature
+    scale_c_f_0 = data['hw0_f'][0] / data['hw0_c'][0]
+    scale_c_f_1 = data['hw1_f'][0] / data['hw1_c'][0]
+
+    # Convert coarse indices (i_ids_c, j_ids_c) to fine feature coordinates (centers)
+    h0c, w0c = data['hw0_c']
+    h1c, w1c = data['hw1_c']
+    center_coords0_f = torch.stack([i_ids_c % w0c, i_ids_c // w0c], dim=-1) * scale_c_f_0 # (M, 2)
+    center_coords1_f = torch.stack([j_ids_c % w1c, j_ids_c // w1c], dim=-1) * scale_c_f_1 # (M, 2)
+
+    # Build a lookup for sparse GT points based on coarse indices
+    # Key: (b_id, i_id, j_id), Value: index in spv_pt1_i
+    
+    gt_map = {}
+    points_per_batch = {}
+    current_batch_idx = -1
+    within_batch_counter = 0
+    for idx, (b, i, j) in enumerate(zip(spv_b_ids.tolist(), spv_i_ids.tolist(), spv_j_ids.tolist())):
+        # 2025-10-27:
+        if b != current_batch_idx:
+            if current_batch_idx != -1:
+                points_per_batch[current_batch_idx] = within_batch_counter
+            current_batch_idx = b
+            within_batch_counter = 0
+            gt_map[(b, i, j)] = within_batch_counter
+            within_batch_counter += 1
+        if current_batch_idx != -1:
+            points_per_batch[current_batch_idx] = within_batch_counter
+        # gt_map[(b, i, j)] = idx
+
+    # Find the corresponding GT point for each of the M fine matches
+    # Find the corresponding GT point (batch_idx, within_batch_idx) for each of the M fine matches
+    gt_batch_indices = []
+    gt_within_batch_indices = []
+    valid_match_mask_list = []
+    # gt_indices = []
+    # valid_match_mask = []
+    for idx, (b, i, j) in enumerate(zip(b_ids_c.tolist(), i_ids_c.tolist(), j_ids_c.tolist())):
+        within_batch_idx = gt_map.get((b, i, j), -1)
+        if within_batch_idx != -1:
+            gt_batch_indices.append(b)
+            gt_within_batch_indices.append(within_batch_idx)
+            valid_match_mask_list.append(True)
+        else:
+            valid_match_mask_list.append(False)
+        # gt_idx = gt_map.get((b, i, j), -1)
+        # gt_indices.append(gt_idx)
+        # valid_match_mask.append(gt_idx != -1)
+
+    valid_match_mask = torch.tensor(valid_match_mask_list, device=device)
+    if not valid_match_mask.any(): # No GT correspondence found for any fine match
+        empty_gt = torch.full((M, 2), float('nan'), device=device)
+        return empty_gt, valid_match_mask
+
+        # empty_gt = torch.empty(0, 2, device=device)
+        # empty_mask = torch.zeros(M, dtype=torch.bool, device=device)
+
+    # gt_indices = torch.tensor(gt_indices, device=device)[valid_match_mask]
+    
+    valid_batch_indices = torch.tensor(gt_batch_indices, device=device, dtype=torch.long)
+    valid_within_batch_indices = torch.tensor(gt_within_batch_indices, device=device, dtype=torch.long)
+    matched_spv_pt1_i = spv_pt1_i[valid_batch_indices, valid_within_batch_indices, :]
+
+    scale_c_f_0 = data['hw0_f'][0] / data['hw0_c'][0]
+    scale_c_f_1 = data['hw1_f'][0] / data['hw1_c'][0]
+    scale_i_f_1 = data['hw1_f'][0] / data['hw1_i'][0]
+
+    h1c, w1c = data['hw1_c']
+    valid_j_ids_c = j_ids_c[valid_match_mask]
+    center_coords1_f_valid = torch.stack([valid_j_ids_c % w1c, valid_j_ids_c // w1c], dim=-1).float() * scale_c_f_1
+
+    # デバッグログ追加
+    # logger.debug(f"valid_match_mask shape: {valid_match_mask.shape}")
+    # logger.debug(f"valid_match_mask dtype: {valid_match_mask.dtype}")
+    # logger.debug(f"Number of True in mask: {valid_match_mask.sum().item()}")
+
+    # logger.debug(f"center_coords1_f_valid shape: {center_coords1_f_valid.shape}")
+    # logger.debug(f"matched_spv_pt1_i shape: {matched_spv_pt1_i.shape}") 
+
+    # Scale GT points to fine feature resolution (M_valid, 2)
+    matched_spv_pt1_f = matched_spv_pt1_i * scale_i_f_1
+
+    # Calculate offset relative to the fine window center (M_valid, 2)
+    gt_offset_pixels = matched_spv_pt1_f - center_coords1_f_valid 
+    # Normalize offset to [-1, 1] range (M_valid, 2)
+    half_W = W_f / 2.0
+    expec_f_gt_normalized_valid = gt_offset_pixels / half_W
+
+    full_expec_f_gt = torch.full((M, 2), float('nan'), device=device) 
+    full_expec_f_gt[valid_match_mask] = expec_f_gt_normalized_valid 
+
+    full_valid_mask = valid_match_mask # (M,)
+
+    return full_expec_f_gt, full_valid_mask
+
+    # valid_gt_indices = gt_indices[valid_match_mask]
+    # logger.debug(f"valid_match_mask shape: {valid_match_mask.shape}")
+    # logger.debug(f"valid_match_mask dtype: {valid_match_mask.dtype}")
+    # logger.debug(f"Number of True in mask: {valid_match_mask.sum().item()}")
+    # logger.debug(f"center_coords1_f shape: {center_coords1_f.shape}")
+    # logger.debug(f"valid_gt_indices shape: {valid_gt_indices.shape}")
+    # logger.debug(f"spv_pt1_i shape: {spv_pt1_i.shape}")
+    # matched_spv_pt1_i = spv_pt1_i[gt_indices] # (M_valid, 2) - GT points in image coords
+
+    # # Scale GT points to fine feature resolution
+    # scale_i_f_1 = data['hw1_f'][0] / data['hw1_i'][0] # Fine_feature_res / Image_res
+    # matched_spv_pt1_f = matched_spv_pt1_i * scale_i_f_1 # (M_valid, 2)
+
+    # logger.debug(f"valid_match_mask shape: {valid_match_mask.shape}")
+    # logger.debug(f"valid_match_mask dtype: {valid_match_mask.dtype}")
+    # logger.debug(f"Number of True in mask: {valid_match_mask.sum().item()}")
+    # logger.debug(f"center_coords1_f shape: {center_coords1_f.shape}")
+    
+    # # Calculate offset relative to the fine window center
+    # window_center = center_coords1_f[valid_match_mask] # (M_valid, 2)
+    # gt_offset_pixels = matched_spv_pt1_f - window_center # (M_valid, 2)
+
+    # # Normalize offset to [-1, 1] range based on window size W_f
+    # # Offset of W_f/2 pixels corresponds to normalized coordinate 1.0
+    # half_W = W_f / 2.0
+    # expec_f_gt_normalized = gt_offset_pixels / half_W # (M_valid, 2)
+
+    # # Need to return a tensor of shape (M, 2), filling non-GT matches maybe with NaN or filtering later
+    # # For simplicity, let's return only the valid GT offsets first. Loss function needs adjustment.
+    # # Alternative: Create full tensor and mark invalid ones
+    # full_expec_f_gt = torch.full((M, 2), float('nan'), device=device)
+    # full_expec_f_gt[valid_match_mask] = expec_f_gt_normalized
+    
+    # full_valid_mask = valid_match_mask
+
+    # # Return only the valid ones for now, loss function needs to handle the indexing
+    # return full_expec_f_gt, full_valid_mask
+
 
 def compute_supervision_fine(data, config):
     data_source = data['dataset_name'][0]
@@ -130,6 +284,11 @@ def compute_supervision_fine(data, config):
     else:
         raise NotImplementedError
     
+    W_f = config['AS_MAMBA']['FINE_WINDOW_SIZE']
+    expec_f_gt, valid_gt_mask = compute_fine_ground_truth(data, W_f)
+    
+    data['expec_f_gt'] = expec_f_gt
+    data['expec_f_gt_mask'] = valid_gt_mask
 
 @torch.no_grad()
 def spvs_fine(data, config):

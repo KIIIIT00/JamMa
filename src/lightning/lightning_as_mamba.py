@@ -19,6 +19,7 @@ import torch
 import numpy as np
 import pytorch_lightning as pl
 from matplotlib import pyplot as plt
+import warnings
 
 from src.jamma.backbone import CovNextV2_nano
 
@@ -104,6 +105,10 @@ class PL_ASMamba(pl.LightningModule):
         n_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         logger.info(f'AS-Mamba trainable parameters: {n_parameters / 1e6:.2f}M')
         
+        # Debug gradient hooks
+        self.gradient_hooks = []
+        self._setup_gradient_hooks()
+        
     def _build_model(self, config):
         """
         Build AS-Mamba model components.
@@ -152,6 +157,80 @@ class PL_ASMamba(pl.LightningModule):
                           f"unexpected keys: {len(unexpected)}")
         except Exception as e:
             logger.error(f"Failed to load checkpoint {pretrained_ckpt}: {e}")
+    
+    def _setup_gradient_hooks(self):
+        """Setup hooks to monitor gradients"""
+        try:
+            logger.info("[Gradient Check] Setting up gradient hooks for debugging...")
+            
+            # monitor parameters
+            check_list = {}
+            
+            first_block = self.matcher.as_mamba_blocks[0]
+            global_mamba_mixer = first_block.global_mamba.layers[0].mixer
+            check_list["Block[0]_GlobalMamba_mixer.in_proj.weight"] = global_mamba_mixer.in_proj.weight
+            
+            init_geom_mixer = self.matcher.mamba_initializer.layers[0].mixer
+            check_list["Initializer_GeomMixer.in_proj.weight"] = init_geom_mixer.in_proj.weight
+            
+            fine_enc_layer = self.matcher.fine_enc[0].mlp1[0] 
+            check_list["FineEnc_MLP[0].weight"] = fine_enc_layer.weight
+            
+            flow_pred_layer = first_block.flow_predictor.flow_head
+            check_list["Block[0]_FlowHead.weight"] = flow_pred_layer.weight
+            
+            # hook list 
+            for name, param in check_list.items():
+                if param.requires_grad:
+                    self.gradient_hooks.append((name, param))
+                else:
+                    logger.warning(f"[Gradient Check] Parameter {name} does not require grad(requires_grad = False).")
+            logger.warning(f"[Gradient Check] Total {len(self.gradient_hooks)} parameters are hooked for gradient monitoring.")
+        except AttributeError as e:
+            logger.error(f"[Gradient Check] Attribute error during hook setup: {e}")
+            logger.error("Hint: Check if the model architecture has changed and the specified layers exist.")
+        except Exception as e:
+            logger.error(f"[Gradient Check] Failed to setup gradient hooks: {e}")
+            
+    def on_after_backward(self):
+        """backward() check gradients for hooked parameters"""
+        if self.trainer.global_rank == 0 and (self.global_step == 0 or self.global_step % 100 == 0):
+            
+            try:
+                grad_memory_bytes = sum(p.grad.element_size() * p.grad.nelement() 
+                                    for p in self.parameters() if p.grad is not None)
+                
+                grad_memory_gb = grad_memory_bytes / 1024**3
+                
+                logger.info(f"  - Gradient Memory: {grad_memory_gb:.3f} GB")
+                
+                self.log("memory/grad_mem_gb", grad_memory_gb, on_step=True, on_epoch=False, prog_bar=True)
+
+            except Exception as e:
+                logger.warning(f"Failed to calculate gradient memory: {e}")
+
+
+            if not self.gradient_hooks:
+                return
+            
+            logger.info(f"[Gradient Check] Gradients at step {self.global_step}:")
+            all_ok = True
+            for name, param in self.gradient_hooks:
+                if param.grad is None:
+                    logger.error(f"  - {name}: grad is None")
+                    all_ok = False
+                elif torch.all(param.grad == 0):
+                    logger.error(f"  - {name}: grad is all zeros")
+                    all_ok = False
+                else:
+                    grad_norm = param.grad.norm().item()
+                    logger.info(f"  - {name}: grad norm = {grad_norm:.6f}")
+            
+            
+            if all_ok:
+                logger.info("  All monitored gradients are valid.")
+            else:
+                logger.error("  Some monitored gradients are invalid (None or all zeros).")
     
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
@@ -229,8 +308,20 @@ class PL_ASMamba(pl.LightningModule):
             ):
                 self.backbone(batch)
         
+        # 2025-10-28 Debug NaN check after backbone
+        logger.debug(f"batch keys after Backbone: {list(batch.keys())}")
+        logger.debug("Checking for NaNs after Backbone...")
+
+        # if not torch.isfinite(batch['feat_c']).all() or not torch.isfinite(batch['feat_f']).all():
+        #     logger.error("[NaN DETECTED] At Step 1: Backbone output (feat_c or feat_f) contains NaN/Inf.")
+        #     logger.error(f"  - feat_c has NaN: {torch.isnan(batch['feat_c']).any()}")
+        #     logger.error(f"  - feat_f has NaN: {torch.isnan(batch['feat_f']).any()}")
+        #     raise RuntimeError("NaN/Inf detected after Backbone.")
+        
         # 4. AS-Mamba processing
         # This includes: flow prediction -> adaptive spans -> hierarchical Mamba
+        if mode == 'train':
+            batch['global_step'] = self.global_step  # For logging in AS-Mamba
         with self.profiler.profile("AS-Mamba Matcher"):
             with torch.autocast(
                 enabled=self.config.AS_MAMBA.MP,
@@ -253,6 +344,7 @@ class PL_ASMamba(pl.LightningModule):
                 device_type='cuda'
             ):
                 self.loss(batch)
+                logger.debug(f"Loss 0 total loss: {batch['loss'].item()}")
     
     def _compute_metrics(self, batch, compute_f1_score=False):
         """
@@ -329,11 +421,6 @@ class PL_ASMamba(pl.LightningModule):
             efficiency = (allocated / reserved * 100) if reserved > 0 else 0
             logger.info(f"  - Memory Efficiency: {efficiency:.1f}%")
             
-            # 勾配のメモリ使用量
-            grad_memory = sum(p.grad.element_size() * p.grad.nelement() 
-                            for p in self.parameters() if p.grad is not None) / 1024**3
-            logger.info(f"  - Gradient Memory: {grad_memory:.3f} GB")
-            logger.info(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
         self._trainval_inference(batch, mode='train')
         
         # Logging

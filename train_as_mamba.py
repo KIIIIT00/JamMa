@@ -52,6 +52,8 @@ from src.utils.profiler import build_profiler
 from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_as_mamba import PL_ASMamba
 
+# torch.autograd.set_detect_anomaly(True)
+
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
 
 def train_step_with_memory_logging(self, batch, batch_idx):
@@ -279,7 +281,7 @@ def main():
     trainer = pl.Trainer.from_argparse_args(
         args,
         plugins=DDPPlugin(
-            find_unused_parameters=False,
+            find_unused_parameters=True,
             num_nodes=args.num_nodes,
             sync_batchnorm=config.TRAINER.WORLD_SIZE > 0
         ),
@@ -291,7 +293,8 @@ def main():
         reload_dataloaders_every_epoch=False,
         weights_summary='full',
         profiler=profiler,
-        fast_dev_run=args.debug
+        fast_dev_run=args.debug,
+        precision=32
     )
     
     loguru_logger.info("=" * 80)

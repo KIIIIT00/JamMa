@@ -107,7 +107,17 @@ class AS_Mamba(nn.Module):
 
         # Fine-level encoder and matching
         W = self.config['fine_window_size']
-        self.fine_enc = nn.ModuleList([MLPMixerEncoderLayer(2*W**2, 64) for _ in range(4)])
+        # self.fine_enc = nn.ModuleList([MLPMixerEncoderLayer(2*W**2, 64) for _ in range(4)])
+        dim1_C = self.d_model_f
+        dim2_L  = 2 * W ** 2
+        self.fine_enc = nn.ModuleList([
+            MLPMixerEncoderLayer(dim1=dim1_C, dim2=dim2_L)
+            for _ in range(4)
+        ])
+        # self.fine_enc = nn.ModuleList([
+        #     MLPMixerEncoderLayer(self.d_model_f, self.d_model_f * 4) 
+        #     for _ in range(4)
+        # ])
         self.fine_matching = FineSubMatching(config, self.profiler)
         
         # Optional: Geometry-aware fine matching (future extension)
@@ -177,6 +187,10 @@ class AS_Mamba(nn.Module):
         # FIXED: Collect flow predictions from all blocks
         flow_predictions = []
         
+        # 2025-10-24 FIXED: Geometric features lists Initialization
+        geom_outputs_0 = [data['feat_geom_0']]
+        geom_outputs_1 = [data['feat_geom_1']]
+        
         # Iterative refinement through AS-Mamba blocks
         for block_idx, as_block in enumerate(self.as_mamba_blocks):
             with self.profiler.profile(f"as-mamba block {block_idx}"):
@@ -186,6 +200,10 @@ class AS_Mamba(nn.Module):
                 else:
                     data = as_block(data)
                 # data = as_block(data)
+                
+                # 2025-10-24 FIXED: Collect geometric features from each block
+                geom_outputs_0.append(data['feat_geom_0'])
+                geom_outputs_1.append(data['feat_geom_1'])
                 
                 # FIXED: Properly collect and store flow predictions
                 if 'flow_map' in data:
@@ -207,6 +225,10 @@ class AS_Mamba(nn.Module):
             flows_0to1 = torch.cat([f[0] for f in flow_predictions], dim=0)  # (N_blocks, B, H, W, 4)
             flows_1to0 = torch.cat([f[1] for f in flow_predictions], dim=0)
             data['predict_flow'] = [(flows_0to1, flows_1to0)]
+            
+            # 2025-10-24 FIXED: Store all geometric features
+            data['predict_geom_0'] = geom_outputs_0  # List of tensors from
+            data['predict_geom_1'] = geom_outputs_1
         
         # Prepare for matching
         mask_c0 = mask_c1 = None
@@ -234,6 +256,68 @@ class AS_Mamba(nn.Module):
         feat_2 = self.conv8b(d1)
         return feat_2
 
+    # def fine_preprocess(self, data, profiler):
+    #     """
+    #     Preprocess features for fine-level matching.
+        
+    #     Optionally incorporates geometric features for better fine matching.
+    #     """
+    #     data['resolution1'] = 8
+    #     stride = data['resolution1'] // self.config['resolution'][1]
+    #     W = self.config['fine_window_size']
+        
+    #     # Prepare features
+    #     feat_8 = torch.cat([data['feat_8_0'], data['feat_8_1']], 0).view(
+    #         2*data['bs'], data['c'], data['h_8'], -1
+    #     )
+    #     feat_4 = torch.cat([data['feat_4_0'], data['feat_4_1']], 0)
+
+    #     if data['b_ids'].shape[0] == 0:
+    #         # 2025-10-24 FIXED: shape (0, C_fine, WW)
+    #         # feat0 = torch.empty(0, W ** 2, self.d_model_f, device=feat_4.device)
+    #         # feat1 = torch.empty(0, W ** 2, self.d_model_f, device=feat_4.device)
+    #         # return feat0, feat1
+    #         feat0 = torch.empty(0, self.d_model_f, W ** 2, device=feat_4.device)
+    #         feat1 = torch.empty(0, self.d_model_f, W ** 2, device=feat_4.device)
+    #         return feat0, feat1
+
+    #     # Multi-scale feature propagation
+    #     feat_f = self.inter_fpn(feat_8, feat_4)
+    #     # feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1)
+    #     feat_f0, feat_f1 = torch.chunk(feat_f, 2, dim=0)
+    #     data.update({'hw0_f': feat_f0.shape[2:], 'hw1_f': feat_f1.shape[2:]})
+
+    #     # Unfold (crop) all local windows
+    #     pad = 0 if W % 2 == 0 else W//2
+    #     feat_f0_unfold = F.unfold(feat_f0, kernel_size=(W, W), stride=stride, padding=pad)
+    #     feat_f0_unfold = rearrange(feat_f0_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
+    #     feat_f1_unfold = F.unfold(feat_f1, kernel_size=(W, W), stride=stride, padding=pad)
+    #     feat_f1_unfold = rearrange(feat_f1_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
+
+    #     # Select only the predicted matches
+    #     feat_f0_unfold = feat_f0_unfold[data['b_ids'], data['i_ids']]
+    #     feat_f1_unfold = feat_f1_unfold[data['b_ids'], data['j_ids']]
+
+    #     # Optional: Incorporate geometric features for fine matching
+    #     if self.use_geom_for_fine and 'feat_geom_0' in data:
+    #         # This would require additional processing to incorporate geometric cues
+    #         # For now, we proceed with standard fine matching
+    #         pass
+
+    #     # Fine-level feature encoding
+    #     # feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1).transpose(1, 2)
+    #     # 2025-10-24: FIXED: (N, 2*WW, C_fine)
+    #     feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1)
+    #     for layer in self.fine_enc:
+    #         feat_f = layer(feat_f)
+    #     # feat_f0_unfold, feat_f1_unfold = feat_f[:,  :W**2], feat_f[:, :, W**2:]
+    #     feat_f0_unfold = feat_f[:, :W**2, :]  # (N, 25, 64)
+    #     feat_f1_unfold = feat_f[:, W**2:, :]  # (N, 25, 64)
+    #     # 2025-10-24: FIXED: (N, 2*WW, C_fine) -> (N, C_fine, 2*WW)
+    #     feat_f0_unfold = feat_f0_unfold.transpose(1, 2) # (N, C_fine, WW)
+    #     feat_f1_unfold = feat_f1_unfold.transpose(1, 2) # (N, C_fine, WW)
+        
+    #     return feat_f0_unfold, feat_f1_unfold
     def fine_preprocess(self, data, profiler):
         """
         Preprocess features for fine-level matching.
@@ -249,8 +333,15 @@ class AS_Mamba(nn.Module):
             2*data['bs'], data['c'], data['h_8'], -1
         )
         feat_4 = torch.cat([data['feat_4_0'], data['feat_4_1']], 0)
+        
+        # [Log]
+        global_step_str = data.get('global_step', 'N/A')
 
         if data['b_ids'].shape[0] == 0:
+            # LOG
+            if self.training:
+                logger.warning(f"[WARNING] Step {global_step_str}: No coarse matches found for fine matching during TRAINING.")
+            # 【修正】 形状を (0, WW, C_fine) に修正
             feat0 = torch.empty(0, W ** 2, self.d_model_f, device=feat_4.device)
             feat1 = torch.empty(0, W ** 2, self.d_model_f, device=feat_4.device)
             return feat0, feat1
@@ -266,23 +357,31 @@ class AS_Mamba(nn.Module):
         feat_f0_unfold = rearrange(feat_f0_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
         feat_f1_unfold = F.unfold(feat_f1, kernel_size=(W, W), stride=stride, padding=pad)
         feat_f1_unfold = rearrange(feat_f1_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
+        # 形状: (B, L_full, WW, C_fine)
 
         # Select only the predicted matches
         feat_f0_unfold = feat_f0_unfold[data['b_ids'], data['i_ids']]
         feat_f1_unfold = feat_f1_unfold[data['b_ids'], data['j_ids']]
+        # 形状: (N, WW, C_fine) = (403, 25, 64)
 
         # Optional: Incorporate geometric features for fine matching
         if self.use_geom_for_fine and 'feat_geom_0' in data:
-            # This would require additional processing to incorporate geometric cues
-            # For now, we proceed with standard fine matching
             pass
 
         # Fine-level feature encoding
-        feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1).transpose(1, 2)
-        for layer in self.fine_enc:
-            feat_f = layer(feat_f)
-        feat_f0_unfold, feat_f1_unfold = feat_f[:, :, :W**2], feat_f[:, :, W**2:]
+        # (N, L, C) = (N, 2*WW, C_fine) = (403, 50, 64)
+        feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1)
         
+        # MLPMixer (dim1=C=64, dim2=L=50) に (N, L, C) を渡す
+        for layer in self.fine_enc:
+            feat_f = layer(feat_f) # 出力形状: (N, L, C) = (403, 50, 64)
+        
+        # (N, L, C) = (403, 50, 64)
+        
+        # L次元 (dim=1) でスライス
+        feat_f0_unfold = feat_f[:, :W**2, :]  # 形状: (N, WW, C_fine) = (403, 25, 64)
+        feat_f1_unfold = feat_f[:, W**2:, :]  # 形状: (N, WW, C_fine) = (403, 25, 64)
+
         return feat_f0_unfold, feat_f1_unfold
 
     def forward(self, data, mode='test'):
@@ -314,9 +413,15 @@ class AS_Mamba(nn.Module):
             feat_f0_unfold, feat_f1_unfold = self.fine_preprocess(data, self.profiler)
 
             # Fine-level matching and sub-pixel refinement
+            # self.fine_matching(
+            #     feat_f0_unfold.transpose(1, 2), 
+            #     feat_f1_unfold.transpose(1, 2), 
+            #     data
+            # )
+            # 2025-10-24 FIXED: (N, C_fine, WW)
             self.fine_matching(
-                feat_f0_unfold.transpose(1, 2), 
-                feat_f1_unfold.transpose(1, 2), 
+                feat_f0_unfold, 
+                feat_f1_unfold, 
                 data
             )
         

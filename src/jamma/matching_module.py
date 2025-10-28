@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops.einops import rearrange
 from loguru import logger
+from kornia.geometry.subpix import dsnt
+from kornia.utils.grid import create_meshgrid
 INF = 1e9
 
 
@@ -75,6 +77,7 @@ class CoarseMatching(nn.Module):
         # general config
         d_model = 256
         self.thr = config['thr']
+        logger.debug(f"CoarseMatching threshold set to: {self.thr}")
         self.use_sm = config['use_sm']
         self.inference = config['inference']
         self.border_rm = config['border_rm']
@@ -140,6 +143,9 @@ class CoarseMatching(nn.Module):
         b_ids, i_ids, j_ids = mask.nonzero(as_tuple=True)
 
         mconf = torch.maximum(conf_matrix_0_to_1[b_ids, i_ids, j_ids], conf_matrix_1_to_0[b_ids, i_ids, j_ids])
+        # logger.debug(f"Number of coarse matches before sampling/padding: {len(b_ids)}")
+        # logger.debug(f"mconf shape before sampling/padding: {mconf.shape}, requires_grad: {mconf.requires_grad}")
+        # logger.debug(f"mconf sample before sampling/padding: {mconf[:10]}")
 
         # random sampling of training samples for fine-level XoFTR
         # (optional) pad samples with gt coarse-level matches
@@ -192,6 +198,8 @@ class CoarseMatching(nn.Module):
         mkpts0_c = torch.stack(
             [i_ids % data['hw0_c'][1], torch.div(i_ids, data['hw0_c'][1], rounding_mode='trunc')],
             dim=1) * scale0
+        # logger.debug(f"mkpts0_c shape: {mkpts0_c.shape}, requires_grad: {mkpts0_c.requires_grad}")
+        # logger.debug(f"mkpts0_C[mconf != 0] shape: {mkpts0_c[mconf != 0].shape}, requires_grad: {mkpts0_c[mconf != 0].requires_grad}")
         mkpts1_c = torch.stack(
             [j_ids % data['hw1_c'][1], torch.div(j_ids, data['hw1_c'][1], rounding_mode='trunc')],
             dim=1) * scale1
@@ -289,21 +297,41 @@ class FineSubMatching(nn.Module):
         self.profiler = profiler
 
     def forward(self, feat_f0_unfold, feat_f1_unfold, data):
+
+        if not torch.isfinite(feat_f0_unfold).all() or not torch.isfinite(feat_f1_unfold).all():
+                logger.error(f"[NaN DETECTED] Fine-level features (feat_f0_unfold or feat_f1_unfold) contain NaN/Inf!")
+                logger.error(f"  - feat_f0_unfold has NaN: {torch.isnan(feat_f0_unfold).any()}")
+                logger.error(f"  - feat_f1_unfold has NaN: {torch.isnan(feat_f1_unfold).any()}")
+                logger.error(f"  - feat_f0_unfold has Inf: {torch.isinf(feat_f0_unfold).any()}")
+                logger.error(f"  - feat_f1_unfold has Inf: {torch.isinf(feat_f1_unfold).any()}")
+                
+                # ここで意図的にクラッシュさせ、NaNの発生源（多くの場合 FineEnc_MLP）を特定する
+                raise RuntimeError("NaN/Inf detected in fine-level features before matching.")
+        
         M, WW, C = feat_f0_unfold.shape
         W_f = self.W_f
+        assert WW == W_f * W_f, f"Expected window size {W_f*W_f}, but got {WW}"
+        scale = data['hw0_i'][0] / data['hw0_c'][0]
+        
+        # DEBUG
+        global_step_str = data.get('global_step', 'N/A')
+        # logger.debug(f"[Step {global_step_str}] FineSubMatching called with M={M}, WW={WW}, C={C}")
+        
 
         # corner case: if no coarse matches found
         if M == 0:
             assert self.training == False, "M is always >0, when training, see coarse_matching.py"
-            logger.warning('No matches found in coarse-level.')
+            # logger.warning('No matches found in coarse-level.')
             if self.inference:
                 data.update({
+                    'expec_f': torch.zeros(0, 3, device=feat_f0_unfold.device),
                     'mkpts0_f': data['mkpts0_c'],
                     'mkpts1_f': data['mkpts1_c'],
-                    'mconf_f': torch.zeros(0, device=feat_f0_unfold.device),
+                    'mconf_f': torch.zeros(0, device=feat_f0_unfold.device)
                 })
             else:
                 data.update({
+                    'expec_f': torch.zeros(0, 3, device=feat_f0_unfold.device),
                     'mkpts0_f': data['mkpts0_c'],
                     'mkpts1_f': data['mkpts1_c'],
                     'mconf_f': torch.zeros(0, device=feat_f0_unfold.device),
@@ -314,21 +342,217 @@ class FineSubMatching(nn.Module):
                     'i_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
                     'j_ids_fine': torch.zeros(0, device=feat_f0_unfold.device),
                 })
+            # Add keys needed for training loss if M=0 occurs during training
+            if self.training:
+                 data.update({
+                      'mkpts0_f_train': data.get('mkpts0_c_train', torch.empty(0, 2, device=feat_f0_unfold.device)),
+                      'mkpts1_f_train': data.get('mkpts1_c_train', torch.empty(0, 2, device=feat_f0_unfold.device)),
+                      # Add other training specific keys if needed
+                 })
             return
 
-        feat_f0 = self.fine_proj(feat_f0_unfold)
-        feat_f1 = self.fine_proj(feat_f1_unfold)
+        # 2025-10-25: feature extraction at the center of each window
+        feat_f0_center = feat_f0_unfold[:, WW // 2, :]
 
-        # normalize
-        feat_f0, feat_f1 = map(lambda feat: feat / feat.shape[-1] ** .5,
-                               [feat_f0, feat_f1])
-        sim_matrix = torch.einsum("nlc,nsc->nls", feat_f0,
-                                  feat_f1) / self.temperature
+        feat_f0_center = F.normalize(feat_f0_center, p=2, dim=-1)
+        feat_f1 = F.normalize(feat_f1_unfold, p=2, dim=-1)
+        
+        # 2025-10-25: simirary
+        sim_matrix = torch.einsum("mc,mwc->mw", feat_f0_center,feat_f1)
+        
+        # 2025-10-25: heatmap
+        softmax_temp = self.temperature
+        heatmap = torch.softmax(softmax_temp * sim_matrix, dim=1).view(-1, W_f, W_f)
+        
+        # 2025-10-25: DSNT
+        coords_normalized = dsnt.spatial_expectation2d(heatmap.unsqueeze(1), True).squeeze(1)
+        
+        # 2025-10-25: 
+        grid_normalized = create_meshgrid(W_f, W_f, True, heatmap.device).reshape(1, WW, 2) # (1, WW, 2)
+        var = torch.sum(grid_normalized**2 * heatmap.view(-1, WW, 1), dim=1) - coords_normalized**2
+        std = torch.sum(torch.sqrt(torch.clamp(var, min=1e-10)), -1)
+        
+        expec_f = torch.cat([coords_normalized, std.unsqueeze(1)], -1)
+        data.update({'expec_f': expec_f})
+        # logger.debug(f"[Step {global_step_str}] Calculated expec_f shape: {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
+        
+        # logger.debug(f"heatmap shape: {heatmap.shape}, requires_grad: {heatmap.requires_grad}")
+        self.get_fine_match_compatible(coords_normalized, data, heatmap)
+    
+    @torch.no_grad()
+    def get_fine_match_compatible(self, coords_normalized, data, heatmap):
+        """Calculates final coordinates based on normalized coords,
+           compatible with existing JamMa/AS-Mamba structure."""
+        M = coords_normalized.shape[0]
+        W_f = self.W_f
+        scale = data['hw0_i'][0] / data['hw0_f'][0] # Image_res / Fine_feature_res
 
-        conf_matrix_fine = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
+        # print("DEBUG: data['b_ids']:", data['b_ids'])
+        # print("DEBUG: data['mkpts0_c'] shape:", data['mkpts0_c'].shape)
+        # print("DEBUG: data[mkpts0_c] keys:", list(data.keys()))
+        # mkpts0_f = data['mkpts0_c'][data['b_ids']] # (M, 2) 
+        
+        h0c, w0c = data['hw0_c']
+        h1c, w1c = data['hw1_c']
+        mkpts0_c_coords = torch.stack([data['i_ids'] % w0c, data['i_ids'] // w0c], dim=1).float()
+        # logger.debug(f"mkpts0_c_coords shape: {mkpts0_c_coords.shape}, requires_grad: {mkpts0_c_coords.requires_grad}")
+        mkpts1_c_coords = torch.stack([data['j_ids'] % w1c, data['j_ids'] // w1c], dim=1).float()
+        # logger.debug(f"mkpts1_c_coords shape: {mkpts1_c_coords.shape}, requires_grad: {mkpts1_c_coords.requires_grad}")
 
-        # predict fine-level and sub-pixel matches from conf_matrix
-        data.update(**self.get_fine_sub_match(conf_matrix_fine, feat_f0_unfold, feat_f1_unfold, data))
+        # mkpts1_f は coarse 座標に DSNT の結果を加味して補正
+        # coords_normalized: [-1, 1] -> offset in fine feature pixel space: * (W_f / 2)
+        # -> offset in image pixel space: * scale
+        # offset = coords_normalized * (W_f / 2.0) * scale # (M, 2)
+
+        # mkpts0_f
+        scale_c_i_0 = data['hw0_i'][0] / data['hw0_c'][0]
+        if 'scale0' in data and 'b_ids' in data:
+            scale0_m = data['scale0'][data['b_ids']] # (M,)
+            # logger.debug(f"scale0_m shape: {scale0_m.shape}, requires_grad: {scale0_m.requires_grad}")
+            mkpts0_c_image_scale = (mkpts0_c_coords * scale_c_i_0) * scale0_m
+            base_offset = coords_normalized * (W_f / 2.0) * scale
+            offset = base_offset * scale0_m
+        else:
+            mkpts0_c_image_scale = mkpts0_c_coords * scale_c_i_0
+            offset = coords_normalized * (W_f / 2.0) * scale # (M, 2)
+        
+        mkpts0_f = mkpts0_c_image_scale + offset # (M, 2)
+        # logger.debug(f"mkpts0_f shape[get_fine_match_compatible]: {mkpts0_f.shape}, requires_grad: {mkpts0_f.requires_grad}")
+        
+        scale_c_i_1 = data['hw1_i'][0] / data['hw1_c'][0] # Image_res / Coarse_feature_res
+        # スケーリングファクタ (もしあれば適用)
+        if 'scale1' in data and 'b_ids' in data:
+            # Ensure scale1 corresponds to the M matches
+            scale1_m = data['scale1'][data['b_ids']] # (M,)
+            # offset = offset * scale1_m.unsqueeze(-1)
+            # logger.debug(f"scale1_m shape: {scale1_m.shape}, requires_grad: {scale1_m.requires_grad}")
+            mkpts1_c_image_scale = (mkpts1_c_coords * scale_c_i_1) * scale1_m
+            base_offset = coords_normalized * (W_f / 2.0) * scale
+            
+            offset = base_offset * scale1_m
+        
+        else:
+            mkpts1_c_image_scale = mkpts1_c_coords * scale_c_i_1
+            offset = coords_normalized * (W_f / 2.0) * scale # (M, 2)
+
+        mkpts1_f = mkpts1_c_image_scale + offset # (M, 2)
+
+        # logger.debug(f"mkpts1_f shape[get_fine_match_compatible]: {mkpts1_f.shape}, requires_grad: {mkpts1_f.requires_grad}")
+
+        # mconf (信頼度) を計算 (オプション、評価用)
+        mconf, _ = heatmap.view(M, -1).max(dim=1)
+
+        data.update({
+            "mkpts0_f": mkpts0_f,
+            "mkpts1_f": mkpts1_f,
+            "mconf_f": mconf # 評価に必要な場合
+        })
+
+        # --- 学習用の座標 (mkpts0_f_train, mkpts1_f_train) ---
+        # 元の JamMa では subpixel_mlp を使っていたが、ASpanFormer では使っていない
+        # L_fine の勾配は expec_f を通じて流れるため、subpixel_mlp は不要かもしれない
+        # ここでは、DSNTの結果を直接使った座標を学習用とする
+        if self.training:
+            mkpts0_f_train = mkpts0_f.detach().clone()
+            mkpts1_f_train = mkpts1_f.detach().clone()
+
+            update_dict = {
+                'mkpts0_f_train': mkpts0_f_train,
+                'mkpts1_f_train': mkpts1_f_train,
+            }
+            data.update({
+                'mkpts0_f_train': mkpts0_f.detach().clone(), # 勾配はexpec_f経由なのでdetach
+                'mkpts1_f_train': mkpts1_f.detach().clone()
+                # 'conf_matrix_fine' など、他の学習に必要なキーもここかforwardの最後で追加
+            })
+        
+        M = data['b_ids'].shape[0] 
+        # logger.debug(f"Number of fine matches before sampling/padding: {M}")
+        # logger.debug(f"mconf_f shape before sampling/padding: {mconf.shape}, requires_grad: {mconf.requires_grad}")
+        train_mask = None
+        if hasattr(self, 'fine_spv_max') and self.fine_spv_max is not None and self.fine_spv_max < M:
+             try:
+                  train_mask = generate_random_mask(M, self.fine_spv_max)
+                  update_dict.update({
+                       'b_ids_fine': data['b_ids'][train_mask],
+                       'i_ids_fine': data['i_ids'][train_mask],
+                       'j_ids_fine': data['j_ids'][train_mask],
+                  })
+             except NameError:
+                  logger.error("'generate_random_mask' not defined. Using all matches.")
+                  update_dict.update({
+                      'b_ids_fine': data['b_ids'],
+                      'i_ids_fine': data['i_ids'],
+                      'j_ids_fine': data['j_ids'],
+                  })
+        else: # サンプリングしない場合
+             update_dict.update({
+                 'b_ids_fine': data['b_ids'],
+                 'i_ids_fine': data['i_ids'],
+                 'j_ids_fine': data['j_ids'],
+             })
+
+        data.update(update_dict)
+        
+        # feat_f0 = self.fine_proj(feat_f0_unfold)
+        # feat_f1 = self.fine_proj(feat_f1_unfold)
+
+    #     # normalize
+    #     feat_f0, feat_f1 = map(lambda feat: feat / feat.shape[-1] ** .5,
+    #                            [feat_f0, feat_f1])
+    #     sim_matrix = torch.einsum("nlc,nsc->nls", feat_f0,
+    #                               feat_f1) / self.temperature
+
+    #     conf_matrix_fine = F.softmax(sim_matrix, 1) * F.softmax(sim_matrix, 2)
+        
+    #     # expec_f
+    #     expec_f = self.calculate_expec_f(conf_matrix_fine, W_f)
+    #     data.update({'expec_f': expec_f})
+    #     logger.debug(f"[Step {global_step_str}] Calculated expec_f with shape: {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
+        
+
+    #     # predict fine-level and sub-pixel matches from conf_matrix
+    #     data.update(**self.get_fine_sub_match(conf_matrix_fine, feat_f0_unfold, feat_f1_unfold, data))
+    
+    # def calculate_expec_f(self, conf_matrix_fine, W_f):
+    #     """Calculate the expected offset (expec_f) differentiably."""
+    #     M, WW, _ = conf_matrix_fine.shape
+    #     device = conf_matrix_fine.device
+
+    #     # ウィンドウ内の相対座標グリッド [- (W-1)/2, ..., (W-1)/2] を作成
+    #     center_offset = (W_f - 1) / 2.0
+    #     grid_coords = torch.arange(W_f, device=device, dtype=torch.float32) - center_offset
+
+    #     # グリッドを (WW, 2) に整形: [[x0,y0], [x1,y0], ..., [xW,yW]]
+    #     grid_y, grid_x = torch.meshgrid(grid_coords, grid_coords, indexing='ij')
+    #     grid = torch.stack([grid_x, grid_y], dim=-1).view(WW, 2) # (WW, 2)
+
+    #     # 期待値計算 (Spatial Expectation)
+    #     # conf_matrix_fine: (M, WW_0, WW_1)
+        
+    #     # E[pos1 | pos0] = sum_{pos1} ( P(pos1 | pos0) * pos1 )
+    #     # P(pos1 | pos0) は softmax(sim[:, pos0, :], dim=1) に相当
+    #     prob_map_1 = F.softmax(conf_matrix_fine.sum(dim=1) / self.temperature, dim=1) # (M, WW_1) 各点0に対する点1の確率分布
+    #     # expec_1: 各点0に対する点1の期待座標 (M, 2)
+    #     expec_1 = torch.einsum('mi,ic->mc', prob_map_1, grid)
+
+    #     # E[pos0 | pos1] = sum_{pos0} ( P(pos0 | pos1) * pos0 )
+    #     # P(pos0 | pos1) は softmax(sim[:, :, pos1], dim=1) に相当
+    #     prob_map_0 = F.softmax(conf_matrix_fine.sum(dim=2) / self.temperature, dim=1) # (M, WW_0) 各点1に対する点0の確率分布
+    #     # expec_0: 各点1に対する点0の期待座標 (M, 2)
+    #     expec_0 = torch.einsum('mi,ic->mc', prob_map_0, grid)
+
+    #     # expec_f は「点0の座標」から「点1の期待座標」へのオフセットとするのが一般的
+    #     # 点0のウィンドウ中心はオフセット(0,0)に対応すると考える
+    #     center_coords_0 = torch.zeros(M, 2, device=device)
+    #     offset_pred = expec_1 - center_coords_0 # (M, 2)
+
+    #     # 不確実性 (std) の計算 (オプション)
+    #     # 例: 予測の分散やエントロピーから計算。ここでは仮に固定値とする
+    #     std_dev = torch.ones(M, 1, device=device) * 0.1 # 仮の値
+
+    #     expec_f = torch.cat([offset_pred, std_dev], dim=1) # (M, 3)
+    #     return expec_f
 
     def get_fine_sub_match(self, conf_matrix_fine, feat_f0_unfold, feat_f1_unfold, data):
         with torch.no_grad():
@@ -413,7 +637,9 @@ class FineSubMatching(nn.Module):
         }
 
         # These matches are used for training
+        # logger.debug(f"self.inference: {self.inference}")
         if not self.inference:
+            logger.debug(f"Number of fine matches before sampling/padding: {len(data['b_ids'])}")
             if self.fine_spv_max is None or self.fine_spv_max > len(data['b_ids']):
                 sub_pixel_matches.update({
                     'mkpts0_f_train': mkpts0_f_train,

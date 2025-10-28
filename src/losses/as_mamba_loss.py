@@ -65,7 +65,7 @@ class ASMambaLoss(nn.Module):
         self.c_neg_w = self.loss_config['neg_weight']
         
         # Fine-level configuration
-        self.fine_type = self.loss_config.get('fine_type', 'l2_with_std')
+        self.fine_type = self.loss_config.get('fine_type', 'l2')
         self.correct_thr = self.loss_config.get('fine_correct_thr', 0.5)
         
         # Focal loss parameters
@@ -226,7 +226,7 @@ class ASMambaLoss(nn.Module):
         
         return loss
     
-    def compute_fine_loss(self, expec_f, expec_f_gt):
+    def compute_fine_loss(self, expec_f, expec_f_gt, expec_f_gt_mask):
         """
         Fine-level matching loss with uncertainty.
         
@@ -238,6 +238,19 @@ class ASMambaLoss(nn.Module):
             expec_f: Predicted fine-level offsets (M, 2) or (M, 3) with std
             expec_f_gt: Ground truth offsets (M, 2)
         """
+        if expec_f_gt_mask.sum() == 0:
+            return torch.tensor(0.0, device=expec_f.device)
+        
+        expec_f_filtered_by_mask = expec_f[expec_f_gt_mask]
+        expec_f_gt_filtered_by_mask = expec_f_gt[expec_f_gt_mask]
+        
+        nan_mask = ~torch.isnan(expec_f_gt_filtered_by_mask).any(dim=-1)
+        if nan_mask.sum() == 0:
+            return torch.tensor(0.0, device=expec_f.device)
+        
+        expec_f_final = expec_f_filtered_by_mask[nan_mask]
+        expec_f_gt_final = expec_f_gt_filtered_by_mask[nan_mask]
+        
         if self.fine_type == 'l2_with_std':
             return self._compute_fine_loss_l2_std(expec_f, expec_f_gt)
         elif self.fine_type == 'l2':
@@ -247,18 +260,36 @@ class ASMambaLoss(nn.Module):
     
     def _compute_fine_loss_l2(self, expec_f, expec_f_gt):
         """Simple L2 fine-level loss."""
+        # logger.debug("Using simple L2 fine-level loss.")
         correct_mask = torch.linalg.norm(
             expec_f_gt, ord=float('inf'), dim=1
         ) < self.correct_thr
+
+        # Extract std and compute weights
+        std = expec_f[:, 2]
+        inverse_std = 1.0 / torch.clamp(std, min=1e-10)
+        weight = (inverse_std / torch.mean(inverse_std)).detach()
+
+        if not correct_mask.any():
+            logger.warning("No correct fine matches - assigning dummy supervision")
+            expec_f_gt = torch.zeros(1, 2, device=expec_f.device)
+            expec_f = torch.zeros(1, 3, device=expec_f.device)
+            correct_mask = torch.ones(1, dtype=torch.bool, device=expec_f.device)
         
         if correct_mask.sum() == 0:
             if self.training:
                 logger.warning("No correct fine matches - assigning dummy supervision")
+                
+            if self.training:
+                logger.warning("No correct fine matches - assigning dummy supervision")
                 correct_mask[0] = True
+                weight[0] = 0.
             else:
                 return None
         
-        flow_l2 = ((expec_f_gt[correct_mask] - expec_f[correct_mask]) ** 2).sum(-1)
+        # flow_l2 = ((expec_f_gt[correct_mask] - expec_f[correct_mask]) ** 2).sum(-1)
+        # return flow_l2.mean()
+        flow_l2 = ((expec_f_gt[correct_mask] - expec_f[correct_mask][:, :2]) ** 2).sum(-1)
         return flow_l2.mean()
     
     def _compute_fine_loss_l2_std(self, expec_f, expec_f_gt):
@@ -289,7 +320,34 @@ class ASMambaLoss(nn.Module):
         flow_l2 = ((expec_f_gt[correct_mask] - expec_f[correct_mask, :2]) ** 2).sum(-1)
         loss = (flow_l2 * weight[correct_mask]).mean()
         
-        return loss
+        return flow_l2.mean()
+    
+    def compute_geometric_loss(self, geom_outputs_0, geom_outputs_1, conf_gt, weight):
+        """
+        Compute geometric consistency loss for all geometry heads.
+        Uses coarse matching loss logic on geometric features.
+        """
+        total_geom_loss = 0.0
+        
+        if not geom_outputs_0:
+            return torch.tensor(0.0, device=conf_gt.device)
+            
+        for feat_g_0, feat_g_1 in zip(geom_outputs_0, geom_outputs_1):
+            # feat_g (B, C_geom, HW) -> (B, HW, C_geom)
+            feat_g_0_flat = feat_g_0.transpose(1, 2)
+            feat_g_1_flat = feat_g_1.transpose(1, 2)
+            
+            feat_g_0_flat = F.normalize(feat_g_0_flat, p=2, dim=-1)
+            feat_g_1_flat = F.normalize(feat_g_1_flat, p=2, dim=-1)
+
+            sim_matrix = torch.einsum('bic,bjc->bij', feat_g_0_flat, feat_g_1_flat)
+            
+
+            sim_matrix = sim_matrix / 0.1 
+            
+            total_geom_loss += self.compute_coarse_loss(sim_matrix, conf_gt, weight)
+            
+        return total_geom_loss / len(geom_outputs_0)
     
     def compute_epipolar_loss(self, data):
         """
@@ -307,18 +365,55 @@ class ASMambaLoss(nn.Module):
         if 'mkpts0_f' not in data or 'T_0to1' not in data:
             return None
         
+        valid_mask = data['mconf_f'] > 0.0
+        # logger.debug(f"valid_mask sum: {valid_mask.sum().item()}")
+        # logger.debug(f"valid_mask shape: {valid_mask.shape}")
+        num_valid_matches = valid_mask.sum()
+        # logger.debug(f"Number of valid matches for epipolar loss: {num_valid_matches.item()}")
+
+        if num_valid_matches == 0:
+            logger.debug("No valid matches found, skipping epipolar loss.")
+            return torch.tensor(0.0, device=data['mconf_f'].device)
+        
+        # logger.debug(f"Data keys: {list(data.keys())}")
+        
+        m_bids = data['b_ids_fine']
+        # logger.debug(f"Computing epipolar loss for {len(m_bids)} matches.")
+
+        pts0 = data['mkpts0_f'][valid_mask]
+        pts1 = data['mkpts1_f'][valid_mask]
+
+        # logger.debug(f"pts0 shape: {pts0.shape}")
+        # logger.debug(f"pts1 shape: {pts1.shape}")
+
+        K0 = data['K0'][m_bids][valid_mask]
+        K1 = data['K1'][m_bids][valid_mask]
+        # logger.debug(f"K0 shape after masking: {K0.shape}") 
+        # logger.debug(f"K1 shape after masking: {K1.shape}")
+
+        T_0to1 = data['T_0to1'][m_bids][valid_mask]
+
+        # logger.debug(f"T_0to1 shape after masking: {T_0to1.shape}")
+        
         # Compute essential matrix
-        Tx = numeric.cross_product_matrix(data['T_0to1'][:, :3, 3])
-        E_mat = Tx @ data['T_0to1'][:, :3, :3]
-        
-        m_bids = data['m_bids']
-        pts0 = data['mkpts0_f']
-        pts1 = data['mkpts1_f']
-        
+        # Tx = numeric.cross_product_matrix(data['T_0to1'][:, :3, 3])
+        # E_mat = Tx @ data['T_0to1'][:, :3, :3]
+        T_0to1_filtered = data['T_0to1'][m_bids][valid_mask]
+        # logger.debug(f"T_0to1_filtered shape: {T_0to1_filtered.shape}")
+
+        Tx = numeric.cross_product_matrix(T_0to1_filtered[:, :3, 3])
+        # logger.debug(f"Tx shape: {Tx.shape}")
+        E_mat = Tx @ T_0to1_filtered[:, :3, :3]
+        # logger.debug(f"E_mat shape: {E_mat.shape}")
+
         # Compute symmetric epipolar distance
+        # sym_dist = self._symmetric_epipolar_distance(
+        #     pts0, pts1, E_mat[m_bids], 
+        #     data['K0'][m_bids], data['K1'][m_bids]
+        # )
         sym_dist = self._symmetric_epipolar_distance(
-            pts0, pts1, E_mat[m_bids], 
-            data['K0'][m_bids], data['K1'][m_bids]
+            pts0, pts1, E_mat, 
+            K0, K1
         )
         
         # Filter outliers (only train on approximately correct matches)
@@ -341,8 +436,16 @@ class ASMambaLoss(nn.Module):
         This is a biased but differentiable approximation of reprojection error.
         """
         # Normalize by intrinsics
+        # logger.debug(f"K0 shape: {K0.shape}, K1 shape: {K1.shape}")
+        # logger.debug(f"Ko0: {K0}, K1: {K1}")
+        # logger.debug(f"E shape: {E.shape}")
+        # logger.debug(f"E: {E}")
+        # logger.debug(f"pts0 shape: {pts0.shape}, pts1 shape: {pts1.shape}")
         pts0 = (pts0 - K0[:, [0, 1], [2, 2]]) / K0[:, [0, 1], [0, 1]]
         pts1 = (pts1 - K1[:, [0, 1], [2, 2]]) / K1[:, [0, 1], [0, 1]]
+
+        # logger.debug(f"pts0: {pts0}, pts1: {pts1}")
+        # logger.debug(f"pts0 shape: {pts0.shape}, pts1 shape: {pts1.shape}")
         
         # Convert to homogeneous
         pts0 = convert_points_to_homogeneous(pts0)
@@ -454,8 +557,14 @@ class ASMambaLoss(nn.Module):
             loss_scalars['loss_c'] = loss_c.clone().detach().cpu()
         
         # 3. FINE MATCHING LOSS
-        if 'expec_f' in data:
-            loss_f = self.compute_fine_loss(data['expec_f'], data['expec_f_gt'])
+        # logger.debug("Computing fine loss...")
+        # logger.debug(f"Data keys for fine loss: {list(data.keys())}")
+        # if 'expec_f' in data:
+        #     logger.debug(f"Computing fine loss using type: {self.fine_type}")
+        #     loss_f = self.compute_fine_loss(data['expec_f'], data['expec_f_gt'])
+        if ('expec_f' in data and 'expec_f_gt' in data and 'expec_f_gt_mask' in data and
+            data['expec_f'].numel() > 0 and data['expec_f_gt'].numel() > 0):
+            loss_f = self.compute_fine_loss(data['expec_f'], data['expec_f_gt'], data['expec_f_gt_mask'])
             if loss_f is not None:
                 total_loss += loss_f * self.fine_weight
                 loss_scalars['loss_f'] = loss_f.clone().detach().cpu()
@@ -471,7 +580,26 @@ class ASMambaLoss(nn.Module):
             else:
                 loss_scalars['loss_epi'] = torch.tensor(0.0)
         
-        # 5. MULTI-SCALE CONSISTENCY LOSS
+        # 2025-10-24 ADD
+        # 5. GEOMETRIC CONSISTENCY LOSS
+        if 'geom_outputs_0' in data and self.loss_config['geom_weight'] > 0:
+            loss_g = self.compute_geometric_loss(
+                data['geom_outputs_0'],
+                data['geom_outputs_1'],
+                data['conf_matrix_gt'],
+                c_weight
+            )
+            if not torch.isnan(loss_g) and not torch.isinf(loss_g):
+                total_loss += loss_g * self.loss_config['geom_weight']
+                loss_scalars['loss_geom'] = loss_g.clone().detach().cpu()
+            else:
+                loss_scalars['loss_geom'] = torch.tensor(0.0)
+                if self.training:
+                     logger.warning("L_geom resulted in NaN/Inf and was skipped.")
+        else:
+            loss_scalars['loss_geom'] = torch.tensor(0.0)
+        
+        # 6. MULTI-SCALE CONSISTENCY LOSS
         if self.multiscale_weight > 0:
             loss_ms = self.compute_multiscale_consistency_loss(data)
             if loss_ms is not None:
