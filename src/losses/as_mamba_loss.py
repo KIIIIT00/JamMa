@@ -66,7 +66,7 @@ class ASMambaLoss(nn.Module):
         
         # Fine-level configuration
         self.fine_type = self.loss_config.get('fine_type', 'l2')
-        self.correct_thr = self.loss_config.get('fine_correct_thr', 0.5)
+        self.correct_thr = self.loss_config.get('fine_correct_thr', 0.3)
         
         # Focal loss parameters
         self.focal_alpha = self.loss_config.get('focal_alpha', 0.25)
@@ -264,6 +264,8 @@ class ASMambaLoss(nn.Module):
         correct_mask = torch.linalg.norm(
             expec_f_gt, ord=float('inf'), dim=1
         ) < self.correct_thr
+        # logger.debug(f"Correct Mask Shape: {correct_mask.shape}")
+        # logger.debug(f"Correct Mask: {correct_mask}")
 
         # Extract std and compute weights
         std = expec_f[:, 2]
@@ -281,6 +283,7 @@ class ASMambaLoss(nn.Module):
         if correct_mask.sum() == 0:
             if self.training:
                 logger.warning("No correct fine matches - returning zero loss for fine-level (graph preserved).")
+                correct_mask[0] = True
                 return (expec_f.sum() * 0.0) 
                 
             # if self.training:
@@ -372,23 +375,25 @@ class ASMambaLoss(nn.Module):
         # logger.debug(f"valid_mask sum: {valid_mask.sum().item()}")
         # logger.debug(f"valid_mask shape: {valid_mask.shape}")
         num_valid_matches = valid_mask.sum()
-        # logger.debug(f"Number of valid matches for epipolar loss: {num_valid_matches.item()}")
+        logger.debug(f"Number of valid matches for epipolar loss: {num_valid_matches.item()}")
 
         if num_valid_matches == 0:
             logger.debug("No valid matches found, skipping epipolar loss.")
             return torch.tensor(0.0, device=data['mconf_f'].device)
         
-        # logger.debug(f"Data keys: {list(data.keys())}")
+        logger.debug(f"Data keys: {list(data.keys())}")
         
         m_bids = data['b_ids_fine']
-        # logger.debug(f"Computing epipolar loss for {len(m_bids)} matches.")
+        logger.debug(f"i_ids_fine matches: {len(data['b_ids'])}")
+        logger.debug(f"Computing epipolar loss for {len(m_bids)} matches.")
 
-        pts0 = data['mkpts0_f'][valid_mask]
-        pts1 = data['mkpts1_f'][valid_mask]
+        pts0 = data['mkpts0_f_train'][valid_mask]
+        pts1 = data['mkpts1_f_train'][valid_mask]
 
         # logger.debug(f"pts0 shape: {pts0.shape}")
         # logger.debug(f"pts1 shape: {pts1.shape}")
 
+        # TODO: Shape checks
         K0 = data['K0'][m_bids][valid_mask]
         K1 = data['K1'][m_bids][valid_mask]
         # logger.debug(f"K0 shape after masking: {K0.shape}") 
@@ -573,7 +578,17 @@ class ASMambaLoss(nn.Module):
                 loss_scalars['loss_f'] = loss_f.clone().detach().cpu()
             else:
                 loss_scalars['loss_f'] = torch.tensor(1.0)
-        
+        # logger.debug(f"After fine loss, data keys: {list(data.keys())}")
+        # logger.debug(f"Data expec_f shape: {data['expec_f'].shape}, values: {data['expec_f']}")
+        # logger.debug(f"Data expec_f_gt shape: {data['expec_f_gt'].shape}, values: {data['expec_f_gt']}")
+        # logger.debug(f"Data mkpts0_f shape: {data['mkpts0_f'].shape}")
+        # logger.debug(f"Data mkpts1_f shape: {data['mkpts1_f'].shape}")
+        # logger.debug(f"Data mconf_f shape: {data['mconf_f'].shape}")
+        # logger.debug(f"Data mkpts0_f_train shape: {data['mkpts0_f_train'].shape}")
+        # logger.debug(f"Data mkpts1_f_train shape: {data['mkpts1_f_train'].shape}")
+
+        # logger.debug(f"Data mconf_f shape: {data['mconf_f'].shape}")
+        # logger.debug(f"Data m_bibs shape: {data['b_ids_fine'].shape}")
         # 4. EPIPOLAR GEOMETRIC LOSS
         if self.epipolar_weight > 0:
             loss_epi = self.compute_epipolar_loss(data)

@@ -675,7 +675,7 @@ class LocalAdaptiveMamba(nn.Module):
         span_diffs = torch.abs(avg_spans - target_span)
         
         # Within tolerance
-        tolerance = 1.5
+        tolerance = 3.0
         mask = span_diffs < tolerance
         
         # FIX: Exclude already assigned positions

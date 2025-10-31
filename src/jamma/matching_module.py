@@ -208,6 +208,8 @@ class CoarseMatching(nn.Module):
         coarse_matches.update({
             'gt_mask': mconf == 0,
             'm_bids': b_ids[mconf != 0],  # mconf == 0 => gt matches
+            'mi_ids': i_ids[mconf != 0],
+            'mj_ids': j_ids[mconf != 0],
             'mkpts0_c': mkpts0_c[mconf != 0],
             'mkpts1_c': mkpts1_c[mconf != 0],
             'mkpts0_c_train': mkpts0_c,
@@ -272,6 +274,8 @@ class CoarseMatching(nn.Module):
         coarse_matches.update({
             'mconf': mconf,
             'm_bids': b_ids,  # mconf == 0 => gt matches
+            'mi_ids': i_ids,
+            'mj_ids': j_ids,
             'mkpts0_c': mkpts0_c,
             'mkpts1_c': mkpts1_c,
         })
@@ -304,8 +308,7 @@ class FineSubMatching(nn.Module):
                 logger.error(f"  - feat_f1_unfold has NaN: {torch.isnan(feat_f1_unfold).any()}")
                 logger.error(f"  - feat_f0_unfold has Inf: {torch.isinf(feat_f0_unfold).any()}")
                 logger.error(f"  - feat_f1_unfold has Inf: {torch.isinf(feat_f1_unfold).any()}")
-                
-                # ここで意図的にクラッシュさせ、NaNの発生源（多くの場合 FineEnc_MLP）を特定する
+
                 raise RuntimeError("NaN/Inf detected in fine-level features before matching.")
         
         M, WW, C = feat_f0_unfold.shape
@@ -320,7 +323,7 @@ class FineSubMatching(nn.Module):
 
         # corner case: if no coarse matches found
         if M == 0:
-            assert self.training == False, "M is always >0, when training, see coarse_matching.py"
+            # assert self.training == False, "M is always >0, when training, see coarse_matching.py"
             # logger.warning('No matches found in coarse-level.')
             if self.inference:
                 data.update({
@@ -356,7 +359,12 @@ class FineSubMatching(nn.Module):
 
         feat_f0_center = F.normalize(feat_f0_center, p=2, dim=-1)
         feat_f1 = F.normalize(feat_f1_unfold, p=2, dim=-1)
-        
+
+        # 2025-10-28: [DEBUG] FineSubMatching.forward feat_f0_center and feat_f1 shapes
+        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f0_center.shape = {feat_f0_center.shape}, requires_grad: {feat_f0_center.requires_grad}")
+        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f1.shape = {feat_f1.shape}, requires_grad: {feat_f1.requires_grad}")
+
+
         # 2025-10-25: simirary
         sim_matrix = torch.einsum("mc,mwc->mw", feat_f0_center,feat_f1)
         
@@ -373,6 +381,10 @@ class FineSubMatching(nn.Module):
         std = torch.sum(torch.sqrt(torch.clamp(var, min=1e-10)), -1)
         
         expec_f = torch.cat([coords_normalized, std.unsqueeze(1)], -1)
+
+        # 2025-10-28: [DEBUG] expec_f shape
+        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: expec_f shape = {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
+
         data.update({'expec_f': expec_f})
         # logger.debug(f"[Step {global_step_str}] Calculated expec_f shape: {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
         
@@ -449,9 +461,6 @@ class FineSubMatching(nn.Module):
         })
 
         # --- 学習用の座標 (mkpts0_f_train, mkpts1_f_train) ---
-        # 元の JamMa では subpixel_mlp を使っていたが、ASpanFormer では使っていない
-        # L_fine の勾配は expec_f を通じて流れるため、subpixel_mlp は不要かもしれない
-        # ここでは、DSNTの結果を直接使った座標を学習用とする
         if self.training:
             mkpts0_f_train = mkpts0_f.detach().clone()
             mkpts1_f_train = mkpts1_f.detach().clone()

@@ -359,24 +359,34 @@ class AS_Mamba(nn.Module):
         feat_f1_unfold = rearrange(feat_f1_unfold, 'n (c ww) l -> n l ww c', ww=W ** 2)
         # 形状: (B, L_full, WW, C_fine)
 
+        # 2025-10-28: [DEBUG] b_ids shape
+        # logger.debug(f"[DEBUG] fine_preprocess: data['b_ids'].shape = {data['b_ids'].shape}")
+        logger.debug(f"[DEBUG] fine_preprocess: data['m_bids'].shape = {data['m_bids'].shape}") # m_bids の形状を確認
+        logger.debug(f"[DEBUG] fine_preprocess: data['mi_ids'].shape = {data['mi_ids'].shape}") # mi_ids の形状を確認
+        logger.debug(f"[DEBUG] fine_preprocess: data['mj_ids'].shape = {data['mj_ids'].shape}")
         # Select only the predicted matches
-        feat_f0_unfold = feat_f0_unfold[data['b_ids'], data['i_ids']]
-        feat_f1_unfold = feat_f1_unfold[data['b_ids'], data['j_ids']]
-        # 形状: (N, WW, C_fine) = (403, 25, 64)
+
+        # feat_f0_unfold = feat_f0_unfold[data['m_bids'], data['i_ids']] 
+        # feat_f1_unfold = feat_f1_unfold[data['m_bids'], data['j_ids']]
+        feat_f0_unfold = feat_f0_unfold[data['m_bids'], data['mi_ids']]
+        feat_f1_unfold = feat_f1_unfold[data['m_bids'], data['mj_ids']]
 
         # Optional: Incorporate geometric features for fine matching
         if self.use_geom_for_fine and 'feat_geom_0' in data:
             pass
 
         # Fine-level feature encoding
-        # (N, L, C) = (N, 2*WW, C_fine) = (403, 50, 64)
         feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1)
+
+        # 2025-10-28: [DEBUG] Before MLP
+        logger.debug(f"[DEBUG] fine_preprocess: feat_f (before MLP).shape = {feat_f.shape}")
         
         # MLPMixer (dim1=C=64, dim2=L=50) に (N, L, C) を渡す
         for layer in self.fine_enc:
             feat_f = layer(feat_f) # 出力形状: (N, L, C) = (403, 50, 64)
         
-        # (N, L, C) = (403, 50, 64)
+        # 2025-10-28: [DEBUG] After MLP
+        logger.debug(f"[DEBUG] fine_preprocess: feat_f (after MLP).shape = {feat_f.shape}")
         
         # L次元 (dim=1) でスライス
         feat_f0_unfold = feat_f[:, :W**2, :]  # 形状: (N, WW, C_fine) = (403, 25, 64)
@@ -406,6 +416,7 @@ class AS_Mamba(nn.Module):
         })
 
         # Coarse-level matching with AS-Mamba blocks
+        logger.debug("Starting coarse-level matching with AS-Mamba...")
         self.coarse_match(data)
 
         with self.profiler.profile("fine matching"):

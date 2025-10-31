@@ -128,17 +128,33 @@ def compute_fine_ground_truth(data, W_f):
     # Check if necessary keys exist
     required_keys = ['b_ids', 'i_ids', 'j_ids', 'spv_b_ids', 'spv_i_ids', 'spv_j_ids',
                      'spv_w_pt0_i', 'spv_pt1_i', 'hw0_c', 'hw1_c', 'hw0_f', 'hw1_f']
+    logger.debug(f"[GT] Data keys available: {list(data.keys())}")
     if not all(key in data for key in required_keys) or data['b_ids'].numel() == 0:
         empty_gt = torch.empty(0, 2, device=data['b_ids'].device)
         empty_mask = torch.empty(0, dtype=torch.bool, device=data['b_ids'].device)
         return empty_gt, empty_mask # Return empty if M=0 or keys missing
+    # if not all(key in data for key in required_keys) or data['m_bids'].numel() == 0:
+    #     empty_gt = torch.empty(0, 2, device=data['b_ids'].device)
+    #     empty_mask = torch.empty(0, dtype=torch.bool, device=data['b_ids'].device)
+    #     return empty_gt, empty_mask # Return empty if M=0 or keys missing
+    # logger.debug(f"Ground Truth computation: Checking required keys...")
+    # if 'm_bids' not in data or data['m_bids'].numel() == 0:
+    #     empty_gt = torch.empty(0, 2, device=data.get('b_ids', torch.tensor([])).device)
+    #     empty_mask = torch.empty(0, dtype=torch.bool, device=empty_gt.device)
+    #     logger.debug(f"[GT] No matches found (m_bids missing or empty). Returning empty GT.")
+    #     return empty_gt, empty_mask
 
+    m_bids, i_ids, j_ids = data['m_bids'], data['i_ids'], data['j_ids']
+
+    # M = data['b_ids'].shape[0]
+    # logger.debug(f"Computing fine GT for {data['b_ids'].shape[0]} matches.")
     M = data['b_ids'].shape[0]
+    logger.debug(f"Computing fine GT for {M} matches.")
     device = data['b_ids'].device
 
     # Get coarse match info corresponding to the M fine matches
+    # b_ids_c, i_ids_c, j_ids_c = data['m_bids'], data['mi_ids'], data['mj_ids'] # Shape: (M,)
     b_ids_c, i_ids_c, j_ids_c = data['b_ids'], data['i_ids'], data['j_ids'] # Shape: (M,)
-
     # Get sparse ground truth supervision points (image coordinates)
     spv_b_ids, spv_i_ids, spv_j_ids = data['spv_b_ids'], data['spv_i_ids'], data['spv_j_ids']
     spv_w_pt0_i, spv_pt1_i = data['spv_w_pt0_i'], data['spv_pt1_i'] # Shape: (N_gt, 2)
@@ -215,12 +231,12 @@ def compute_fine_ground_truth(data, W_f):
     center_coords1_f_valid = torch.stack([valid_j_ids_c % w1c, valid_j_ids_c // w1c], dim=-1).float() * scale_c_f_1
 
     # デバッグログ追加
-    # logger.debug(f"valid_match_mask shape: {valid_match_mask.shape}")
-    # logger.debug(f"valid_match_mask dtype: {valid_match_mask.dtype}")
-    # logger.debug(f"Number of True in mask: {valid_match_mask.sum().item()}")
+    logger.debug(f"valid_match_mask shape: {valid_match_mask.shape}")
+    logger.debug(f"valid_match_mask dtype: {valid_match_mask.dtype}")
+    logger.debug(f"Number of True in mask: {valid_match_mask.sum().item()}")
 
-    # logger.debug(f"center_coords1_f_valid shape: {center_coords1_f_valid.shape}")
-    # logger.debug(f"matched_spv_pt1_i shape: {matched_spv_pt1_i.shape}") 
+    logger.debug(f"center_coords1_f_valid shape: {center_coords1_f_valid.shape}")
+    logger.debug(f"matched_spv_pt1_i shape: {matched_spv_pt1_i.shape}") 
 
     # Scale GT points to fine feature resolution (M_valid, 2)
     matched_spv_pt1_f = matched_spv_pt1_i * scale_i_f_1
@@ -451,27 +467,10 @@ def compute_supervision_flow(data, config):
         spv_j_ids = torch.zeros(1, dtype=torch.long, device=device)
     
     # Compute flow ground truth
-    # Flow is the displacement from source position to target position
-    # print(f"DEBUG: type bs: {type(bs)}")
-    # print(f"DEBUG: type h0: {type(h0)}")
-    # print(f"DEBUG: h0: {h0}")
-    # print(f"DEBUG: type w1: {type(w1)}")
-    # print(f"DEBUG: w1: {w1}")
-
     h0 = h0[0].long()
     w0 = w0[0].long()
     h1 = h1[0].long()
     w1 = w1[0].long()
-
-    # print(f"DEBUG: type bs: {type(bs)}")
-    # print(f"DEBUG: type h0: {type(h0)}")
-    # print(f"DEBUG: h0: {h0}")
-    # print(f"DEBUG: type h1: {type(h1)}")
-    # print(f"DEBUG h1: {h1}")
-    # print(f"DEBUG: type w0: {type(w0)}")
-    # print(f"DEBUG: w0: {w0}")
-    # print(f"DEBUG: type w1: {type(w1)}")
-    # print(f"DEBUG w1: {w1}")
     flow_gt_0to1 = torch.zeros(bs, h0, w0, 2, device=device, dtype=torch.float32)
     flow_gt_1to0 = torch.zeros(bs, h1, w1, 2, device=device, dtype=torch.float32)
     

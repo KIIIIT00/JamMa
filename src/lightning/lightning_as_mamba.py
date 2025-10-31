@@ -167,6 +167,9 @@ class PL_ASMamba(pl.LightningModule):
             check_list = {}
             
             first_block = self.matcher.as_mamba_blocks[0]
+            
+            # Global Mamba Hook (変更なし・動作確認済み)
+            # JointMambaMultiHead -> layers[0] (MambaBlock) -> mixer
             global_mamba_mixer = first_block.global_mamba.layers[0].mixer
             check_list["Block[0]_GlobalMamba_mixer.in_proj.weight"] = global_mamba_mixer.in_proj.weight
             
@@ -179,13 +182,29 @@ class PL_ASMamba(pl.LightningModule):
             flow_pred_layer = first_block.flow_predictor.flow_head
             check_list["Block[0]_FlowHead.weight"] = flow_pred_layer.weight
             
-            # hook list 
+            # --- ここからが修正箇所 ---
+            try:
+                local_mamba_mixer = self.matcher.as_mamba_blocks[0].local_mamba.mamba_blocks['span_15'][0].mixer_match
+                check_list["Block[0]_LocalMamba_mixer_match.in_proj.weight"] = local_mamba_mixer.in_proj.weight
+                
+                # Coarse Matching Hook (変更なし)
+                coarse_proj = self.matcher.coarse_matching.final_proj
+                check_list["CoarseMatching_final_proj.weight"] = coarse_proj.weight
+            
+            except AttributeError as e:
+                logger.error(f"[Gradient Check] Attribute error during hook setup (new checks): {e}")
+                logger.error("Hint: Check if LocalMamba or CoarseMatching architecture has changed.")
+            # --- ここまでが修正箇所 ---
+
+            # hook list (変更なし)
             for name, param in check_list.items():
                 if param.requires_grad:
                     self.gradient_hooks.append((name, param))
                 else:
                     logger.warning(f"[Gradient Check] Parameter {name} does not require grad(requires_grad = False).")
             logger.warning(f"[Gradient Check] Total {len(self.gradient_hooks)} parameters are hooked for gradient monitoring.")
+        
+        # ... (以降の except 節も変更なし) ...
         except AttributeError as e:
             logger.error(f"[Gradient Check] Attribute error during hook setup: {e}")
             logger.error("Hint: Check if the model architecture has changed and the specified layers exist.")
@@ -309,8 +328,8 @@ class PL_ASMamba(pl.LightningModule):
                 self.backbone(batch)
         
         # 2025-10-28 Debug NaN check after backbone
-        logger.debug(f"batch keys after Backbone: {list(batch.keys())}")
-        logger.debug("Checking for NaNs after Backbone...")
+        # logger.debug(f"batch keys after Backbone: {list(batch.keys())}")
+        # logger.debug("Checking for NaNs after Backbone...")
 
         # if not torch.isfinite(batch['feat_c']).all() or not torch.isfinite(batch['feat_f']).all():
         #     logger.error("[NaN DETECTED] At Step 1: Backbone output (feat_c or feat_f) contains NaN/Inf.")
