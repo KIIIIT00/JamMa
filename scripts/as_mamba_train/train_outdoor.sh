@@ -6,9 +6,9 @@ echo "=== AS-Mamba Outdoor Training ==="
 # Configuration
 EXP_NAME="as_mamba_outdoor_$(date +%Y%m%d_%H%M%S)"
 GPUS=1
-BATCH_SIZE=2
+BATCH_SIZE=1
 NUM_WORKERS=4
-MAX_EPOCHS=30
+MAX_EPOCHS=3
 
 echo "Experiment: $EXP_NAME"
 echo "GPUs: $GPUS"

@@ -84,7 +84,8 @@ class AS_Mamba_Block(nn.Module):
         self.feature_fusion = FeatureFusionFFN(
             d_model=d_model,
             d_ffn=d_ffn,
-            dropout=dropout
+            dropout=dropout,
+            num_streams =2
         )
         
         self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
@@ -240,61 +241,61 @@ class AS_Mamba_Block(nn.Module):
         # ============================================
         # Step 4: Global path - OPTIMIZATION 3 (Gradient Checkpointing)
         # ============================================
-        if self.use_checkpoint and self.training:
-            # Gradient checkpointing for global path
-            def global_forward(fm0, fm1):
-                # Downsample
-                fm0_ds = self.downsample(fm0)
-                fm1_ds = self.downsample(fm1)
+        # if self.use_checkpoint and self.training:
+        #     # Gradient checkpointing for global path
+        #     def global_forward(fm0, fm1):
+        #         # Downsample
+        #         fm0_ds = self.downsample(fm0)
+        #         fm1_ds = self.downsample(fm1)
                 
-                # Create data dict
-                global_data = {
-                    'feat_8_0': fm0_ds,
-                    'feat_8_1': fm1_ds,
-                    'bs': data['bs'],
-                    'h_8': data['h_8'] // 2,
-                    'w_8': data['w_8'] // 2
-                }
+        #         # Create data dict
+        #         global_data = {
+        #             'feat_8_0': fm0_ds,
+        #             'feat_8_1': fm1_ds,
+        #             'bs': data['bs'],
+        #             'h_8': data['h_8'] // 2,
+        #             'w_8': data['w_8'] // 2
+        #         }
                 
-                # Global mamba
-                self.global_mamba(global_data)
+        #         # Global mamba
+        #         self.global_mamba(global_data)
                 
-                # Extract and upsample
-                gm0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-                gm1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-                gg0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
-                gg1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        #         # Extract and upsample
+        #         gm0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        #         gm1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        #         gg0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        #         gg1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
                 
-                gm0 = self.upsample_match(gm0)
-                gm1 = self.upsample_match(gm1)
-                gg0 = self.upsample_geom(gg0)
-                gg1 = self.upsample_geom(gg1)
+        #         gm0 = self.upsample_match(gm0)
+        #         gm1 = self.upsample_match(gm1)
+        #         gg0 = self.upsample_geom(gg0)
+        #         gg1 = self.upsample_geom(gg1)
                 
-                return gm0, gm1, gg0, gg1
+        #         return gm0, gm1, gg0, gg1
             
-            global_match_0, global_match_1, global_geom_0, global_geom_1 = \
-                checkpoint(global_forward, feat_match_0, feat_match_1)
-        else:
-            # Normal forward (existing code)
-            global_data = {
-                'feat_8_0': self.downsample(feat_match_0),
-                'feat_8_1': self.downsample(feat_match_1),
-                'bs': data['bs'],
-                'h_8': data['h_8'] // 2,
-                'w_8': data['w_8'] // 2
-            }
+        #     global_match_0, global_match_1, global_geom_0, global_geom_1 = \
+        #         checkpoint(global_forward, feat_match_0, feat_match_1)
+        # else:
+        #     # Normal forward (existing code)
+        #     global_data = {
+        #         'feat_8_0': self.downsample(feat_match_0),
+        #         'feat_8_1': self.downsample(feat_match_1),
+        #         'bs': data['bs'],
+        #         'h_8': data['h_8'] // 2,
+        #         'w_8': data['w_8'] // 2
+        #     }
             
-            self.global_mamba(global_data)
+        #     self.global_mamba(global_data)
             
-            global_match_0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-            global_match_1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
-            global_geom_0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
-            global_geom_1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        #     global_match_0 = global_data['feat_8_0'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        #     global_match_1 = global_data['feat_8_1'].view(data['bs'], self.d_model, data['h_8']//2, data['w_8']//2)
+        #     global_geom_0 = global_data['feat_geom_0'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
+        #     global_geom_1 = global_data['feat_geom_1'].view(data['bs'], self.d_geom, data['h_8']//2, data['w_8']//2)
             
-            global_match_0 = self.upsample_match(global_match_0)
-            global_match_1 = self.upsample_match(global_match_1)
-            global_geom_0 = self.upsample_geom(global_geom_0)
-            global_geom_1 = self.upsample_geom(global_geom_1)
+        #     global_match_0 = self.upsample_match(global_match_0)
+        #     global_match_1 = self.upsample_match(global_match_1)
+        #     global_geom_0 = self.upsample_geom(global_geom_0)
+        #     global_geom_1 = self.upsample_geom(global_geom_1)
         
         # ============================================
         # Step 5: Split adaptive spans
@@ -339,12 +340,16 @@ class AS_Mamba_Block(nn.Module):
         # Step 7: Feature fusion - OPTIMIZATION 5 (In-place operations)
         # ============================================
         # Stack features
-        combined_match_0 = torch.stack([global_match_0, local_match_0, feat_match_0], dim=1)
-        combined_match_1 = torch.stack([global_match_1, local_match_1, feat_match_1], dim=1)
+        # combined_match_0 = torch.stack([global_match_0, local_match_0, feat_match_0], dim=1)
+        # combined_match_1 = torch.stack([global_match_1, local_match_1, feat_match_1], dim=1)
+
+        combined_match_0 = torch.stack([local_match_0, feat_match_0], dim=1)
+        combined_match_1 = torch.stack([local_match_1, feat_match_1], dim=1)
         
         # Optimization:
         if self.training:
-            del global_match_0, global_match_1, local_match_0, local_match_1
+            # del global_match_0, global_match_1, local_match_0, local_match_1
+            del local_match_0, local_match_1
         
         # Fusion
         updated_match_0 = self.feature_fusion(combined_match_0)
@@ -359,8 +364,10 @@ class AS_Mamba_Block(nn.Module):
         # ============================================
         # updated_geom_0 = (global_geom_0 + local_geom_0) / 2
         # Optimization（in-place）:
-        updated_geom_0 = global_geom_0.add_(local_geom_0).mul_(0.5)
-        updated_geom_1 = global_geom_1.add_(local_geom_1).mul_(0.5)
+        # updated_geom_0 = global_geom_0.add_(local_geom_0).mul_(0.5)
+        # updated_geom_1 = global_geom_1.add_(local_geom_1).mul_(0.5)
+        updated_geom_0 = local_geom_0
+        updated_geom_1 = local_geom_1
         
         # ============================================
         # Step 9: Update data and return
@@ -381,14 +388,18 @@ class AS_Mamba_Block(nn.Module):
 class FeatureFusionFFN(nn.Module):
     """Feature fusion FFN - unchanged, working correctly."""
     
-    def __init__(self, d_model: int = 256, d_ffn: int = 512, dropout: float = 0.1):
+    def __init__(self, d_model: int = 256, d_ffn: int = 512, dropout: float = 0.1, num_streams: int = 3):
         super().__init__()
+        self.d_ffn= d_ffn
         
+        # self.weight_proj = nn.Sequential(
+        #     nn.Conv2d(3 * d_model, 3, kernel_size=1),
+        #     nn.Softmax(dim=1)
+        # )
         self.weight_proj = nn.Sequential(
-            nn.Conv2d(3 * d_model, 3, kernel_size=1),
+            nn.Conv2d(d_model * num_streams, num_streams, 1), 
             nn.Softmax(dim=1)
         )
-        
         self.ffn = nn.Sequential(
             nn.Conv2d(d_model, d_ffn, kernel_size=3, padding=1),
             nn.BatchNorm2d(d_ffn),
@@ -713,14 +724,17 @@ class LocalAdaptiveMamba(nn.Module):
         # FIX 5: Better boundary handling
         # Instead of hard clamping, reduce span size near boundaries
         # This preserves more information
-        window_centers[:, 1] = torch.clamp(window_centers[:, 1], 0, H - 1)
-        window_centers[:, 2] = torch.clamp(window_centers[:, 2], 0, W - 1)
+        # window_centers[:, 1] = torch.clamp(window_centers[:, 1], 0, H - 1)
+        # window_centers[:, 2] = torch.clamp(window_centers[:, 2], 0, W - 1)
+        window_centers_clamped = window_centers.clone()
+        window_centers_clamped[:, 1] = torch.clamp(window_centers[:, 1], 0, H - 1)
+        window_centers_clamped[:, 2] = torch.clamp(window_centers[:, 2], 0, W - 1)
         
         windows_match = self._extract_windows_grid_sample(
-            feat_match, window_centers, window_size
+            feat_match, window_centers_clamped, window_size
         )
         windows_geom = self._extract_windows_grid_sample(
-            feat_geom, window_centers, window_size
+            feat_geom, window_centers_clamped, window_size
         )
         
         return windows_match, windows_geom, positions

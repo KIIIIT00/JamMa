@@ -26,11 +26,11 @@ _CN.AS_MAMBA.FINE.ACCEPT_PEAKINESS = 0.95
 _CN.AS_MAMBA.FINE.DSMAX_TEMPERATURE = 0.15
 
 # AS-Mamba specific configurations
-_CN.AS_MAMBA.N_BLOCKS = 3  # Number of AS-Mamba blocks
+_CN.AS_MAMBA.N_BLOCKS = 1  # Number of AS-Mamba blocks
 _CN.AS_MAMBA.D_GEOM = 64  # Dimension of geometric features
 _CN.AS_MAMBA.USE_KAN_FLOW = True  # Use KAN for flow prediction (False = MLP)
-_CN.AS_MAMBA.GLOBAL_DEPTH = 4  # Number of Mamba layers in global path
-_CN.AS_MAMBA.LOCAL_DEPTH = 4  # Number of Mamba layers in local path
+_CN.AS_MAMBA.GLOBAL_DEPTH = 1  # Number of Mamba layers in global path
+_CN.AS_MAMBA.LOCAL_DEPTH = 1  # Number of Mamba layers in local path
 _CN.AS_MAMBA.USE_GEOM_FOR_FINE = True  # Use geometric features in fine matching
 
 # Flow predictor settings
@@ -82,7 +82,7 @@ _CN.AS_MAMBA.MP = False  # Mixed precision training
 _CN.AS_MAMBA.EVAL_TIMES = 1  # Number of evaluation runs
 
 ## Memory optimizations
-_CN.AS_MAMBA.USE_CHECKPOINT = False
+_CN.AS_MAMBA.USE_CHECKPOINT = True
 _CN.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
 
 ##############  Dataset (same as JamMa)  ##############

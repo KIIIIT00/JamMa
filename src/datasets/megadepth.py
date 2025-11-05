@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from loguru import logger
 from src.utils.dataset import read_megadepth_depth, read_megadepth_color
+import random
+from PIL import Image
 
 
 def skew(x):
@@ -29,6 +31,9 @@ class MegaDepthDataset(Dataset):
         self.root_dir = root_dir
         self.mode = mode
         self.scene_id = npz_path.split('.')[0]
+
+        ## OOM prevention
+        self.aspect_ratio_th = 2.0
 
         # prepare scene_info and pair_info
         if mode == 'test' and min_overlap_score != 0:
@@ -63,6 +68,27 @@ class MegaDepthDataset(Dataset):
         # read grayscale image and mask. (1, h, w) and (h, w)
         img_name0 = osp.join(self.root_dir, self.scene_info['image_paths'][idx0])
         img_name1 = osp.join(self.root_dir, self.scene_info['image_paths'][idx1])
+
+        ## OOM prevention: skip extreme aspect ratio images
+        try:
+            img_shape0 = Image.open(img_name0).size  # (w, h)
+            w0, h0 = img_shape0
+            ratio0 = max(w0, h0) / min(w0, h0) if min(w0, h0) > 0 else 0
+
+            img_shape1 = Image.open(img_name1).size  # (w, h)
+            w1, h1 = img_shape1
+            ratio1 = max(w1, h1) / min(w1, h1) if min(w1, h1) > 0 else 0
+
+            if (ratio0 > self.aspect_ratio_th or ratio1 > self.aspect_ratio_th or
+                ratio0 == 0 or ratio1 == 0):
+                logger.warning(f"Skip extreme aspect ratio image pair: {img_name0} ({ratio0:.2f}), "
+                               f"{img_name1} ({ratio1:.2f})")
+                new_idx = np.random.randint(0, len(self) - 1)
+                return self.__getitem__(new_idx)
+        except Exception as e:
+            logger.error(f"Error occurred while processing images: {e}")
+            new_idx = random.randint(0, len(self) - 1)
+            return self.__getitem__(new_idx)
 
         imagec_0, scale0, mask0, prepad_size0 = read_megadepth_color(
             img_name0, self.img_resize, self.df, padding=True)

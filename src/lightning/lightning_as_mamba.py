@@ -59,6 +59,59 @@ except ImportError:
           "Flow and span visualizations will be skipped.")
 
 
+def get_memory_gb(stage=""):
+    device = torch.device("cuda")
+    allocated = torch.cuda.memory_allocated(device=device) / 1e6
+    reserved = torch.cuda.memory_reserved(device=device) / 1e6
+    return allocated, reserved
+
+def forward_pre_hook(module, input):
+    global hook_memory_before
+    hook_memory_before, _ = get_memory_gb()
+
+    input_shapes = []
+    if isinstance(input, tuple):
+        for inp in input:
+            if isinstance(inp, torch.Tensor):
+                input_shapes.append(tuple(inp.shape))
+            elif isinstance(inp, dict):
+                 input_shapes.append(
+                     {k: tuple(v.shape) for k, v in inp.items() if isinstance(v, torch.Tensor)}
+                 )
+            else:
+                input_shapes.append(type(inp))
+    
+    logger.debug(f"[HOOK-PRE]  Executing: {module.__class__.__name__}")
+    logger.debug(f"    Input Shapes: {input_shapes}")
+    logger.debug(f"    Memory (Before): {hook_memory_before:.3f} MB")
+
+def forward_post_hook(module, input, output):
+    memory_after, _ = get_memory_gb()
+    memory_consumed = memory_after - hook_memory_before 
+    
+    output_shapes = []
+    if isinstance(output, tuple) or isinstance(output, list):
+         for out in output:
+            if isinstance(out, torch.Tensor):
+                output_shapes.append(tuple(out.shape))
+            elif isinstance(out, dict):
+                 output_shapes.append(
+                     {k: tuple(v.shape) for k, v in out.items() if isinstance(v, torch.Tensor)}
+                 )
+            else:
+                output_shapes.append(type(out))
+    elif isinstance(output, torch.Tensor):
+        output_shapes.append(tuple(output.shape))
+    elif isinstance(output, dict):
+        output_shapes.append(
+            {k: tuple(v.shape) for k, v in output.items() if isinstance(v, torch.Tensor)}
+        )
+
+    logger.debug(f"[HOOK-POST] Executed: {module.__class__.__name__}")
+    logger.debug(f"    Output Shapes: {output_shapes}")
+    logger.debug(f"    Memory (After): {memory_after:.3f} MB")
+    logger.warning(f"    --- Memory Consumed by this Layer: {memory_consumed:.2f} MB ---")
+
 class PL_ASMamba(pl.LightningModule):
     """
     PyTorch Lightning Module for AS-Mamba.
@@ -72,6 +125,9 @@ class PL_ASMamba(pl.LightningModule):
     
     def __init__(self, config, pretrained_ckpt=None, profiler=None, dump_dir=None):
         super().__init__()
+
+        global hook_memory_before
+        hook_memory_before = 0
         
         # Configuration
         self.config = config
@@ -108,6 +164,41 @@ class PL_ASMamba(pl.LightningModule):
         # Debug gradient hooks
         self.gradient_hooks = []
         self._setup_gradient_hooks()
+
+        logger.warning("="*80)
+        logger.warning("WARNING: Attaching detailed memory profiling hooks.")
+        logger.warning("This will generate a large amount of logs and slow down training.")
+
+        # 1. Backbone
+        self.backbone.register_forward_pre_hook(forward_pre_hook)
+        self.backbone.register_forward_hook(forward_post_hook)
+
+        # 2. Coarse Adapter
+        self.matcher.coarse_adapter.register_forward_pre_hook(forward_pre_hook)
+        self.matcher.coarse_adapter.register_forward_hook(forward_post_hook)
+
+        # 3. Mamba Initializer
+        self.matcher.mamba_initializer.register_forward_pre_hook(forward_pre_hook)
+        self.matcher.mamba_initializer.register_forward_hook(forward_post_hook)
+
+        # 5. AS_Mamba_Block
+        for i, block in enumerate(self.matcher.as_mamba_blocks):
+            logger.warning(f"Attaching hooks to AS_Mamba_Block {i}")
+            
+            # All Block
+            block.register_forward_pre_hook(forward_pre_hook)
+            block.register_forward_hook(forward_post_hook)
+            
+            block.global_mamba.register_forward_pre_hook(forward_pre_hook)
+            block.global_mamba.register_forward_hook(forward_post_hook)
+            block.local_mamba.register_forward_pre_hook(forward_pre_hook)
+            block.local_mamba.register_forward_hook(forward_post_hook)
+
+        # 5. FPN 
+        self.matcher.up2.register_forward_pre_hook(forward_pre_hook)
+        self.matcher.up2.register_forward_hook(forward_post_hook)
+        
+        logger.warning("="*80)
         
     def _build_model(self, config):
         """
@@ -168,7 +259,6 @@ class PL_ASMamba(pl.LightningModule):
             
             first_block = self.matcher.as_mamba_blocks[0]
             
-            # Global Mamba Hook (変更なし・動作確認済み)
             # JointMambaMultiHead -> layers[0] (MambaBlock) -> mixer
             global_mamba_mixer = first_block.global_mamba.layers[0].mixer
             check_list["Block[0]_GlobalMamba_mixer.in_proj.weight"] = global_mamba_mixer.in_proj.weight
@@ -182,29 +272,24 @@ class PL_ASMamba(pl.LightningModule):
             flow_pred_layer = first_block.flow_predictor.flow_head
             check_list["Block[0]_FlowHead.weight"] = flow_pred_layer.weight
             
-            # --- ここからが修正箇所 ---
             try:
                 local_mamba_mixer = self.matcher.as_mamba_blocks[0].local_mamba.mamba_blocks['span_15'][0].mixer_match
                 check_list["Block[0]_LocalMamba_mixer_match.in_proj.weight"] = local_mamba_mixer.in_proj.weight
                 
-                # Coarse Matching Hook (変更なし)
                 coarse_proj = self.matcher.coarse_matching.final_proj
                 check_list["CoarseMatching_final_proj.weight"] = coarse_proj.weight
             
             except AttributeError as e:
                 logger.error(f"[Gradient Check] Attribute error during hook setup (new checks): {e}")
                 logger.error("Hint: Check if LocalMamba or CoarseMatching architecture has changed.")
-            # --- ここまでが修正箇所 ---
 
-            # hook list (変更なし)
             for name, param in check_list.items():
                 if param.requires_grad:
                     self.gradient_hooks.append((name, param))
                 else:
                     logger.warning(f"[Gradient Check] Parameter {name} does not require grad(requires_grad = False).")
             logger.warning(f"[Gradient Check] Total {len(self.gradient_hooks)} parameters are hooked for gradient monitoring.")
-        
-        # ... (以降の except 節も変更なし) ...
+
         except AttributeError as e:
             logger.error(f"[Gradient Check] Attribute error during hook setup: {e}")
             logger.error("Hint: Check if the model architecture has changed and the specified layers exist.")
@@ -257,26 +342,51 @@ class PL_ASMamba(pl.LightningModule):
         scheduler = build_scheduler(self.config, optimizer)
         return [optimizer], [scheduler]
     
-    def optimizer_step(
-        self, epoch, batch_idx, optimizer, optimizer_idx,
-        optimizer_closure, on_tpu, using_native_amp, using_lbfgs
-    ):
-        """
-        Custom optimizer step with warmup.
+    # def optimizer_step(
+    #     self, epoch, batch_idx, optimizer, optimizer_idx,
+    #     optimizer_closure, on_tpu, using_native_amp, using_lbfgs
+    # ):
+    #     """
+    #     Custom optimizer step with warmup.
         
-        AS-Mamba benefits from gradual warmup due to:
-        - Flow predictor initialization
-        - Multi-scale feature alignment
-        - Adaptive span learning stability
+    #     AS-Mamba benefits from gradual warmup due to:
+    #     - Flow predictor initialization
+    #     - Multi-scale feature alignment
+    #     - Adaptive span learning stability
+    #     """
+    #     warmup_step = self.config.TRAINER.WARMUP_STEP
+        
+    #     if self.trainer.global_step < warmup_step:
+    #         if self.config.TRAINER.WARMUP_TYPE == 'linear':
+    #             base_lr = self.config.TRAINER.WARMUP_RATIO * self.config.TRAINER.TRUE_LR
+    #             lr = base_lr + \
+    #                  (self.trainer.global_step / warmup_step) * \
+    #                  abs(self.config.TRAINER.TRUE_LR - base_lr)
+    #             for pg in optimizer.param_groups:
+    #                 pg['lr'] = lr
+    #         elif self.config.TRAINER.WARMUP_TYPE == 'constant':
+    #             for pg in optimizer.param_groups:
+    #                 pg['lr'] = self.config.TRAINER.WARMUP_RATIO * self.config.TRAINER.TRUE_LR
+    #         else:
+    #             raise ValueError(f'Unknown warmup type: {self.config.TRAINER.WARMUP_TYPE}')
+        
+    #     # Update parameters
+    #     optimizer.step(closure=optimizer_closure)
+    #     optimizer.zero_grad()
+    def on_before_optimizer_step(self, optimizer, optimizer_idx):
         """
+        Called before optimizer.step() to manually handle LR warmup.
+        This replaces the deprecated optimizer_step override.
+        """
+        # AS-Mamba benefits from gradual warmup
         warmup_step = self.config.TRAINER.WARMUP_STEP
-        
+
         if self.trainer.global_step < warmup_step:
             if self.config.TRAINER.WARMUP_TYPE == 'linear':
                 base_lr = self.config.TRAINER.WARMUP_RATIO * self.config.TRAINER.TRUE_LR
                 lr = base_lr + \
-                     (self.trainer.global_step / warmup_step) * \
-                     abs(self.config.TRAINER.TRUE_LR - base_lr)
+                    (self.trainer.global_step / warmup_step) * \
+                    abs(self.config.TRAINER.TRUE_LR - base_lr)
                 for pg in optimizer.param_groups:
                     pg['lr'] = lr
             elif self.config.TRAINER.WARMUP_TYPE == 'constant':
@@ -284,10 +394,6 @@ class PL_ASMamba(pl.LightningModule):
                     pg['lr'] = self.config.TRAINER.WARMUP_RATIO * self.config.TRAINER.TRUE_LR
             else:
                 raise ValueError(f'Unknown warmup type: {self.config.TRAINER.WARMUP_TYPE}')
-        
-        # Update parameters
-        optimizer.step(closure=optimizer_closure)
-        optimizer.zero_grad()
     
     def _trainval_inference(self, batch, mode='train'):
         """
@@ -347,6 +453,10 @@ class PL_ASMamba(pl.LightningModule):
                 device_type='cuda'
             ):
                 self.matcher(batch, mode=mode)
+                if 'conf_matrix' not in batch:
+                    logger.error("[DEBUG] 'conf_matrix' が data に存在しません！ CoarseMatching が失敗しています。")
+                if batch['b_ids'].shape[0] == 0:
+                    logger.error("[DEBUG] Coarse matching が 0件です (b_ids is empty)。Fine loss はスキップされます。")
         
         # 5. Compute fine-level supervision
         with self.profiler.profile("Compute fine supervision"):

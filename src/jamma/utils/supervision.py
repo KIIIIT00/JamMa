@@ -251,6 +251,9 @@ def compute_fine_ground_truth(data, W_f):
     full_expec_f_gt[valid_match_mask] = expec_f_gt_normalized_valid 
 
     full_valid_mask = valid_match_mask # (M,)
+    logger.debug(f"Full GT shape: {full_expec_f_gt.shape}, Valid mask shape: {full_valid_mask.shape}")
+    logger.debug(f"Number of valid GT matches: {full_valid_mask.sum().item()} out of {M}")
+    logger.debug(f"Example GT offsets (valid): {full_expec_f_gt[full_valid_mask][:5]}")
 
     return full_expec_f_gt, full_valid_mask
 

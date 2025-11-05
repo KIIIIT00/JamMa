@@ -11,7 +11,7 @@ _CN = CN()
 _CN.AS_MAMBA = CN()
 
 ## Memory optimizations
-_CN.AS_MAMBA.USE_CHECKPOINT = False
+_CN.AS_MAMBA.USE_CHECKPOINT = True
 _CN.AS_MAMBA.CHECKPOINT_SEGMENTS = ['flow', 'global', 'local']
 
 # Resolution settings (coarse_scale, fine_scale)

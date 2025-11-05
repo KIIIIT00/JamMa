@@ -71,11 +71,11 @@ def generate_random_mask(n, num_true):
 
 
 class CoarseMatching(nn.Module):
-    def __init__(self, config, profiler):
+    def __init__(self, config, profiler=None, d_model=256):
         super().__init__()
         self.config = config
         # general config
-        d_model = 256
+        self.d_model = d_model
         self.thr = config['thr']
         logger.debug(f"CoarseMatching threshold set to: {self.thr}")
         self.use_sm = config['use_sm']
@@ -108,7 +108,8 @@ class CoarseMatching(nn.Module):
             conf_matrix_0_to_1 = F.softmax(sim_matrix, 2)
             conf_matrix_1_to_0 = F.softmax(sim_matrix, 1)
             data.update({'conf_matrix_0_to_1': conf_matrix_0_to_1,
-                         'conf_matrix_1_to_0': conf_matrix_1_to_0
+                         'conf_matrix_1_to_0': conf_matrix_1_to_0,
+                         'conf_matrix': sim_matrix
                          })
             # predict coarse matches from conf_matrix
             data.update(**self.get_coarse_match_training(conf_matrix_0_to_1, conf_matrix_1_to_0, data))
@@ -361,8 +362,8 @@ class FineSubMatching(nn.Module):
         feat_f1 = F.normalize(feat_f1_unfold, p=2, dim=-1)
 
         # 2025-10-28: [DEBUG] FineSubMatching.forward feat_f0_center and feat_f1 shapes
-        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f0_center.shape = {feat_f0_center.shape}, requires_grad: {feat_f0_center.requires_grad}")
-        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f1.shape = {feat_f1.shape}, requires_grad: {feat_f1.requires_grad}")
+        # logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f0_center.shape = {feat_f0_center.shape}, requires_grad: {feat_f0_center.requires_grad}")
+        # logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: feat_f1.shape = {feat_f1.shape}, requires_grad: {feat_f1.requires_grad}")
 
 
         # 2025-10-25: simirary
@@ -383,7 +384,7 @@ class FineSubMatching(nn.Module):
         expec_f = torch.cat([coords_normalized, std.unsqueeze(1)], -1)
 
         # 2025-10-28: [DEBUG] expec_f shape
-        logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: expec_f shape = {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
+        # logger.debug(f"[Step {global_step_str}] FineSubMatching.forward: expec_f shape = {expec_f.shape}, requires_grad: {expec_f.requires_grad}")
 
         data.update({'expec_f': expec_f})
         # logger.debug(f"[Step {global_step_str}] Calculated expec_f shape: {expec_f.shape}, requires_grad: {expec_f.requires_grad}")

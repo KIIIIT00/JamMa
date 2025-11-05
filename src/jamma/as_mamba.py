@@ -41,7 +41,7 @@ class AS_Mamba(nn.Module):
         self.d_geom = config.get('as_mamba', {}).get('d_geom', 64)     # Geometric feature dimension
         self.use_kan_flow = config.get('as_mamba', {}).get('use_kan_flow', False)  # Use KAN for flow prediction
         self.global_depth = config.get('as_mamba', {}).get('global_depth', 4)  # Depth for global Mamba
-        self.local_depth = config.get('as_mamba', {}).get('local_depth', 4)    # Depth for local Mamba
+        self.local_depth = config.get('as_mamba', {}).get('local_depth', 4)    # Depth for local MSmba
         
         self.use_checkpoint = config.get('as_mamba', {}).get('use_checkpoint', False)
         
@@ -54,7 +54,7 @@ class AS_Mamba(nn.Module):
         logger.info(f"  - local_depth: {self.local_depth}")
         logger.info(f"  - use_checkpoint: {self.use_checkpoint}")
         
-        self.coarse_adapter = nn.Conv2d(160, self.d_model_c, kernel_size=1)
+        self.coarse_adapter = nn.Conv2d(256, self.d_model_c, kernel_size=1)
         
         # debug
         print(f"  - coarse_adapter.in_channels: {self.coarse_adapter.in_channels}")
@@ -68,7 +68,7 @@ class AS_Mamba(nn.Module):
         # Mamba Initializer - Multi-Head version for initial global feature interaction
         self.mamba_initializer = JointMambaMultiHead(
             feature_dim=self.d_model_c, 
-            depth=4,  # Initial shallow processing
+            depth=1,  # Initial shallow processing
             d_geom=self.d_geom,
             return_geometry=True,  # Enable geometry head output
             rms_norm=True, 
@@ -93,11 +93,12 @@ class AS_Mamba(nn.Module):
         ])
         
         # Coarse-level matching module
-        self.coarse_matching = CoarseMatching(config['match_coarse'], self.profiler)
+        self.coarse_matching = CoarseMatching(config['match_coarse'], self.profiler, d_model=self.d_model_c)
 
         # Feature pyramid network for multi-scale processing
         self.act = nn.GELU()
-        dim = [256, 128, 64]
+        # dim = [256, 128, 64]
+        dim = [self.d_model_c, 128, self.d_model_f]
         self.up2 = up_conv4(dim[0], dim[1], dim[1])  # 1/8 -> 1/4
         self.conv7a = nn.Conv2d(2*dim[1], dim[1], kernel_size=3, stride=1, padding=1)
         self.conv7b = nn.Conv2d(dim[1], dim[1], kernel_size=3, stride=1, padding=1)
@@ -329,8 +330,11 @@ class AS_Mamba(nn.Module):
         W = self.config['fine_window_size']
         
         # Prepare features
+        # feat_8 = torch.cat([data['feat_8_0'], data['feat_8_1']], 0).view(
+        #     2*data['bs'], data['c'], data['h_8'], -1
+        # )
         feat_8 = torch.cat([data['feat_8_0'], data['feat_8_1']], 0).view(
-            2*data['bs'], data['c'], data['h_8'], -1
+            2*data['bs'], self.d_model_c, data['h_8'], -1
         )
         feat_4 = torch.cat([data['feat_4_0'], data['feat_4_1']], 0)
         
@@ -361,15 +365,15 @@ class AS_Mamba(nn.Module):
 
         # 2025-10-28: [DEBUG] b_ids shape
         # logger.debug(f"[DEBUG] fine_preprocess: data['b_ids'].shape = {data['b_ids'].shape}")
-        logger.debug(f"[DEBUG] fine_preprocess: data['m_bids'].shape = {data['m_bids'].shape}") # m_bids の形状を確認
-        logger.debug(f"[DEBUG] fine_preprocess: data['mi_ids'].shape = {data['mi_ids'].shape}") # mi_ids の形状を確認
-        logger.debug(f"[DEBUG] fine_preprocess: data['mj_ids'].shape = {data['mj_ids'].shape}")
+        # logger.debug(f"[DEBUG] fine_preprocess: data['m_bids'].shape = {data['m_bids'].shape}") # m_bids の形状を確認
+        # logger.debug(f"[DEBUG] fine_preprocess: data['mi_ids'].shape = {data['mi_ids'].shape}") # mi_ids の形状を確認
+        # logger.debug(f"[DEBUG] fine_preprocess: data['mj_ids'].shape = {data['mj_ids'].shape}")
         # Select only the predicted matches
 
         # feat_f0_unfold = feat_f0_unfold[data['m_bids'], data['i_ids']] 
         # feat_f1_unfold = feat_f1_unfold[data['m_bids'], data['j_ids']]
-        feat_f0_unfold = feat_f0_unfold[data['m_bids'], data['mi_ids']]
-        feat_f1_unfold = feat_f1_unfold[data['m_bids'], data['mj_ids']]
+        feat_f0_unfold = feat_f0_unfold[data['b_ids'], data['i_ids']]
+        feat_f1_unfold = feat_f1_unfold[data['b_ids'], data['j_ids']]
 
         # Optional: Incorporate geometric features for fine matching
         if self.use_geom_for_fine and 'feat_geom_0' in data:
@@ -379,14 +383,14 @@ class AS_Mamba(nn.Module):
         feat_f = torch.cat([feat_f0_unfold, feat_f1_unfold], 1)
 
         # 2025-10-28: [DEBUG] Before MLP
-        logger.debug(f"[DEBUG] fine_preprocess: feat_f (before MLP).shape = {feat_f.shape}")
+        # logger.debug(f"[DEBUG] fine_preprocess: feat_f (before MLP).shape = {feat_f.shape}")
         
         # MLPMixer (dim1=C=64, dim2=L=50) に (N, L, C) を渡す
         for layer in self.fine_enc:
             feat_f = layer(feat_f) # 出力形状: (N, L, C) = (403, 50, 64)
         
         # 2025-10-28: [DEBUG] After MLP
-        logger.debug(f"[DEBUG] fine_preprocess: feat_f (after MLP).shape = {feat_f.shape}")
+        # logger.debug(f"[DEBUG] fine_preprocess: feat_f (after MLP).shape = {feat_f.shape}")
         
         # L次元 (dim=1) でスライス
         feat_f0_unfold = feat_f[:, :W**2, :]  # 形状: (N, WW, C_fine) = (403, 25, 64)

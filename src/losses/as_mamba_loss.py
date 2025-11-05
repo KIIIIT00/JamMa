@@ -381,7 +381,7 @@ class ASMambaLoss(nn.Module):
             logger.debug("No valid matches found, skipping epipolar loss.")
             return torch.tensor(0.0, device=data['mconf_f'].device)
         
-        logger.debug(f"Data keys: {list(data.keys())}")
+        # logger.debug(f"Data keys: {list(data.keys())}")
         
         m_bids = data['b_ids_fine']
         logger.debug(f"i_ids_fine matches: {len(data['b_ids'])}")

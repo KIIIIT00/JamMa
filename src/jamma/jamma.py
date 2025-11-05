@@ -20,7 +20,7 @@ class JamMa(nn.Module):
 
         self.kenc = KeypointEncoder_wo_score(self.d_model_c, [32, 64, 128, self.d_model_c])
         self.joint_mamba = JointMamba(self.d_model_c, 4, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, profiler=self.profiler)
-        self.coarse_matching = CoarseMatching(config['match_coarse'], self.profiler)
+        self.coarse_matching = CoarseMatching(config['match_coarse'], self.profiler, d_model=self.d_model_c)
 
         self.act = nn.GELU()
         dim = [256, 128, 64]

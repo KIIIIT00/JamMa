@@ -20,6 +20,6 @@ cfg.DATASET.MGDPT_DEPTH_PAD = True  # pad depthmap to square with size = 2000
 # (with difficulty balanced (further split each scene to 3 sub-scenes))
 cfg.TRAINER.N_SAMPLES_PER_SUBSET = 100
 
-cfg.DATASET.MGDPT_IMG_RESIZE = 256  # for training on 11GB mem GPUs
+cfg.DATASET.MGDPT_IMG_RESIZE = 128  # for training on 11GB mem GPUs
 cfg.DATASET.CORR_TH = 5
 cfg.TRAINER.EPI_ERR_THR = 1e-4

@@ -52,7 +52,6 @@ from src.utils.profiler import build_profiler
 from src.lightning.data import MultiSceneDataModule
 from src.lightning.lightning_as_mamba import PL_ASMamba
 
-# torch.autograd.set_detect_anomaly(True)
 
 loguru_logger = get_rank_zero_only_logger(loguru_logger)
 
@@ -149,6 +148,7 @@ def main():
     
     # Load configuration
     config = get_cfg_defaults()
+    loguru_logger.info(f"[ CONFIG ] cfg: {config}")
     config.merge_from_file(args.main_cfg_path)
     config.merge_from_file(args.data_cfg_path)
     
@@ -294,7 +294,8 @@ def main():
         weights_summary='full',
         profiler=profiler,
         fast_dev_run=args.debug,
-        precision=32
+        precision=16,
+        accumulate_grad_batches=2
     )
     
     loguru_logger.info("=" * 80)
