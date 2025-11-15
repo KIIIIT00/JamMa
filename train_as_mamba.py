@@ -154,6 +154,10 @@ def main():
     
     # Set random seed for reproducibility
     pl.seed_everything(config.TRAINER.SEED)
+
+    log_dir = Path('as_mamba_logs/') / args.exp_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file_path = log_dir / f"{args.exp_name}_console.log"
     
     if not hasattr(args, 'num_nodes') or args.num_nodes is None:
         args.num_nodes = 1
@@ -232,6 +236,15 @@ def main():
     loguru_logger.info(f"  - Warmup Steps: {config.TRAINER.WARMUP_STEP}")
     loguru_logger.info(f"  - AS-Mamba Blocks: {config.AS_MAMBA.N_BLOCKS}")
     loguru_logger.info(f"  - Flow Weight: {config.AS_MAMBA.LOSS.FLOW_WEIGHT}")
+
+    loguru_logger.add(log_file_path, 
+                      format="{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+                             "{level: <8} | "
+                             "{name}:{function}:{line} - {message}")
+    
+    loguru_logger.info(f"Starting experiment: {args.exp_name}")
+    loguru_logger.info(f"Full console log will be saved to: {log_file_path}")
+    loguru_logger.info(f"Training configuration:\n{pprint.pformat(config)}")
     
     # Initialize profiler
     profiler = build_profiler(args.profiler_name)

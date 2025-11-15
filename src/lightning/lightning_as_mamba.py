@@ -249,6 +249,52 @@ class PL_ASMamba(pl.LightningModule):
         except Exception as e:
             logger.error(f"Failed to load checkpoint {pretrained_ckpt}: {e}")
     
+    # def _setup_gradient_hooks(self):
+    #     """Setup hooks to monitor gradients"""
+    #     try:
+    #         logger.info("[Gradient Check] Setting up gradient hooks for debugging...")
+            
+    #         # monitor parameters
+    #         check_list = {}
+            
+    #         first_block = self.matcher.as_mamba_blocks[0]
+            
+    #         # JointMambaMultiHead -> layers[0] (MambaBlock) -> mixer
+    #         global_mamba_mixer = first_block.global_mamba.layers[0].mixer
+    #         check_list["Block[0]_GlobalMamba_mixer.in_proj.weight"] = global_mamba_mixer.in_proj.weight
+            
+    #         init_geom_mixer = self.matcher.mamba_initializer.layers[0].mixer
+    #         check_list["Initializer_GeomMixer.in_proj.weight"] = init_geom_mixer.in_proj.weight
+            
+    #         fine_enc_layer = self.matcher.fine_enc[0].mlp1[0] 
+    #         check_list["FineEnc_MLP[0].weight"] = fine_enc_layer.weight
+            
+    #         flow_pred_layer = first_block.flow_predictor.flow_head
+    #         check_list["Block[0]_FlowHead.weight"] = flow_pred_layer.weight
+            
+    #         try:
+    #             local_mamba_mixer = self.matcher.as_mamba_blocks[0].local_mamba.mamba_blocks['span_15'][0].mixer_match
+    #             check_list["Block[0]_LocalMamba_mixer_match.in_proj.weight"] = local_mamba_mixer.in_proj.weight
+                
+    #             coarse_proj = self.matcher.coarse_matching.final_proj
+    #             check_list["CoarseMatching_final_proj.weight"] = coarse_proj.weight
+            
+    #         except AttributeError as e:
+    #             logger.error(f"[Gradient Check] Attribute error during hook setup (new checks): {e}")
+    #             logger.error("Hint: Check if LocalMamba or CoarseMatching architecture has changed.")
+
+    #         for name, param in check_list.items():
+    #             if param.requires_grad:
+    #                 self.gradient_hooks.append((name, param))
+    #             else:
+    #                 logger.warning(f"[Gradient Check] Parameter {name} does not require grad(requires_grad = False).")
+    #         logger.warning(f"[Gradient Check] Total {len(self.gradient_hooks)} parameters are hooked for gradient monitoring.")
+
+    #     except AttributeError as e:
+    #         logger.error(f"[Gradient Check] Attribute error during hook setup: {e}")
+    #         logger.error("Hint: Check if the model architecture has changed and the specified layers exist.")
+    #     except Exception as e:
+    #         logger.error(f"[Gradient Check] Failed to setup gradient hooks: {e}")
     def _setup_gradient_hooks(self):
         """Setup hooks to monitor gradients"""
         try:
@@ -257,6 +303,10 @@ class PL_ASMamba(pl.LightningModule):
             # monitor parameters
             check_list = {}
             
+            if not hasattr(self.matcher, 'as_mamba_blocks') or len(self.matcher.as_mamba_blocks) == 0:
+                logger.error("[Gradient Check] self.matcher.as_mamba_blocks not found or is empty. Skipping gradient checks.")
+                return
+
             first_block = self.matcher.as_mamba_blocks[0]
             
             # JointMambaMultiHead -> layers[0] (MambaBlock) -> mixer
@@ -273,7 +323,9 @@ class PL_ASMamba(pl.LightningModule):
             check_list["Block[0]_FlowHead.weight"] = flow_pred_layer.weight
             
             try:
-                local_mamba_mixer = self.matcher.as_mamba_blocks[0].local_mamba.mamba_blocks['span_15'][0].mixer_match
+                local_mamba_block_0 = self.matcher.as_mamba_blocks[0].local_mamba.mamba_blocks[0]
+                
+                local_mamba_mixer = local_mamba_block_0.mixer_match 
                 check_list["Block[0]_LocalMamba_mixer_match.in_proj.weight"] = local_mamba_mixer.in_proj.weight
                 
                 coarse_proj = self.matcher.coarse_matching.final_proj

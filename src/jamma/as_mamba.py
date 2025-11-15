@@ -149,8 +149,9 @@ class AS_Mamba(nn.Module):
             desc0 = self.coarse_adapter(desc0)
             desc1 = self.coarse_adapter(desc1)
         
+        B, C, H, W = desc0.shape
         # Flatten spatial dimensions
-        desc0, desc1 = desc0.flatten(2, 3), desc1.flatten(2, 3)
+        desc0_flat, desc1_flat = desc0.flatten(2, 3), desc1.flatten(2, 3)
         
         kpts0, kpts1 = data['grid_8'], data['grid_8']
         
@@ -159,23 +160,53 @@ class AS_Mamba(nn.Module):
         kpts1 = normalize_keypoints(kpts1, data['imagec_1'].shape[-2:])
 
         kpts0, kpts1 = kpts0.transpose(1, 2), kpts1.transpose(1, 2)
-        desc0 = desc0 + self.kenc(kpts0)
-        desc1 = desc1 + self.kenc(kpts1)
-        
-        # Update data with position-encoded features
+        desc0_flat = desc0_flat + self.kenc(kpts0)
+        desc1_flat = desc1_flat + self.kenc(kpts1)
+
         data.update({
-            'feat_8_0': desc0,
-            'feat_8_1': desc1,
+            'feat_8_0': desc0_flat.reshape(B, C, H, W),
+            'feat_8_1': desc1_flat.reshape(B, C, H, W)
         })
 
-        with self.profiler.profile("mamba initializer"):
-            # Initial global feature interaction with Multi-Head Mamba
-            # self.mamba_initializer(data)
-            if self.use_checkpoint and self.training:
-                # Gradient checkpointing
-                checkpoint(self.mamba_initializer, data)
+        # Mamba Intializer
+        if self.mamba_initializer is not None:
+            self.mamba_initializer(data)
+            
+            data['feat_m_0'] = data['feat_8_0'].transpose(1, 2).reshape(B, C, H, W)
+            data['feat_m_1'] = data['feat_8_1'].transpose(1, 2).reshape(B, C, H, W)
+
+            if 'feat_geom_0' in data:
+                data['feat_g_0'] = data['feat_geom_0']
+                data['feat_g_1'] = data['feat_geom_1']
             else:
-                self.mamba_initializer(data)
+                C_geom = self.d_geom
+                data['feat_g_0'] = torch.zeros(B, C_geom, H, W, device=desc0.device, dtype=desc0.dtype)
+                data['feat_g_1'] = torch.zeros(B, C_geom, H, W, device=desc0.device, dtype=desc0.dtype)
+        else:
+            data.update({
+                'feat_8_0': desc0,
+                'feat_8_1': desc1,
+                'feat_m_0': desc0,
+                'feat_m_1': desc1,
+                'feat_g_0': torch.zeros(desc0.shape[0], self.d_geom, desc0.shape[2], desc0.shape[3], device=desc0.device, dtype=desc0.dtype),
+                'feat_g_1': torch.zeros(desc1.shape[0], self.d_geom, desc1.shape[2], desc1.shape[3], device=desc1.device, dtype=desc1.dtype)
+            })
+        
+        
+        # Update data with position-encoded features
+        # data.update({
+        #     'feat_8_0': desc0,
+        #     'feat_8_1': desc1,
+        # })
+
+        # with self.profiler.profile("mamba initializer"):
+        #     # Initial global feature interaction with Multi-Head Mamba
+        #     # self.mamba_initializer(data)
+        #     if self.use_checkpoint and self.training:
+        #         # Gradient checkpointing
+        #         checkpoint(self.mamba_initializer, data)
+        #     else:
+        #         self.mamba_initializer(data)
             # Now data contains both feat_8_0/1 (matching) and feat_geom_0/1 (geometry)
 
         # with self.profiler.profile("as-mamba blocks"):

@@ -356,7 +356,7 @@ class JointMamba(nn.Module):
 
     def forward(self, data):
         desc0, desc1 = data['feat_8_0'], data['feat_8_1']
-        desc0, desc1 = desc0.view(data['bs'], -1, data['h_8'], data['w_8']), desc1.view(data['bs'], -1, data['h_8'], data['w_8'])
+        desc0, desc1 = desc0.reshape(data['bs'], -1, data['h_8'], data['w_8']), desc1.reshape(data['bs'], -1, data['h_8'], data['w_8'])
         x, ori_h, ori_w = scan_jego(desc0, desc1, 2)
         for i in range(len(self.layers) // 4):
             y0 = self.layers[i * 4](x[:, 0])
@@ -1062,8 +1062,8 @@ class JointMambaMultiHead(nn.Module):
     def forward(self, data):
         """Forward pass with JEGO scanning strategy."""
         desc0, desc1 = data['feat_8_0'], data['feat_8_1']
-        desc0 = desc0.view(data['bs'], -1, data['h_8'], data['w_8'])
-        desc1 = desc1.view(data['bs'], -1, data['h_8'], data['w_8'])
+        desc0 = desc0.reshape(data['bs'], -1, data['h_8'], data['w_8'])
+        desc1 = desc1.reshape(data['bs'], -1, data['h_8'], data['w_8'])
         
         # JEGO scanning
         x, ori_h, ori_w = scan_jego(desc0, desc1, 2)
@@ -1098,8 +1098,8 @@ class JointMambaMultiHead(nn.Module):
         
         # Update data
         data.update({
-            'feat_8_0': desc0_match,
-            'feat_8_1': desc1_match,
+            'feat_8_0': desc0_match.flatten(2, 3),
+            'feat_8_1': desc1_match.flatten(2, 3),
         })
         
         # Optionally process geometric features
@@ -1120,7 +1120,7 @@ class JointMambaMultiHead(nn.Module):
         #     })
         if self.return_geometry:  # ★ 1. まず return_geometry が True かだけをチェック
             if len(y_geom_list) > 0:
-                # --- 従来通りの処理 (depth >= 4 の場合) ---
+            
                 y_geom = y_geom_list[-1]
                 desc0_geom, desc1_geom = merge_jego(y_geom, ori_h, ori_w, 2)
                 
@@ -1135,8 +1135,8 @@ class JointMambaMultiHead(nn.Module):
 
             # このブロックは return_geometry=True なら必ず実行される
             data.update({
-                'feat_geom_0': desc0_geom.flatten(2, 3) if desc0_geom.ndim > 3 else desc0_geom,
-                'feat_geom_1': desc1_geom.flatten(2, 3) if desc1_geom.ndim > 3 else desc1_geom,
+                'feat_geom_0': desc0_geom,
+                'feat_geom_1': desc1_geom,
             })
 
 
