@@ -1118,7 +1118,7 @@ class JointMambaMultiHead(nn.Module):
         #         'feat_geom_0': desc0_geom,
         #         'feat_geom_1': desc1_geom,
         #     })
-        if self.return_geometry:  # ★ 1. まず return_geometry が True かだけをチェック
+        if self.return_geometry:  
             if len(y_geom_list) > 0:
             
                 y_geom = y_geom_list[-1]
@@ -1129,7 +1129,7 @@ class JointMambaMultiHead(nn.Module):
                     desc0_geom, desc1_geom = torch.chunk(desc_geom, 2, dim=0)
             
             else:
-                B, _, H, W = desc0.shape # 入力マッチング特徴量の形状を取得
+                B, _, H, W = desc0.shape 
                 desc0_geom = torch.zeros(B, self.d_geom, H, W, device=desc0.device, dtype=desc0.dtype)
                 desc1_geom = torch.zeros(B, self.d_geom, H, W, device=desc1.device, dtype=desc1.dtype)
 

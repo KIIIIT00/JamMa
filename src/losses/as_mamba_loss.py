@@ -339,16 +339,23 @@ class ASMambaLoss(nn.Module):
             return torch.tensor(0.0, device=conf_gt.device)
             
         for feat_g_0, feat_g_1 in zip(geom_outputs_0, geom_outputs_1):
-            # feat_g (B, C_geom, HW) -> (B, HW, C_geom)
-            feat_g_0_flat = feat_g_0.transpose(1, 2)
-            feat_g_1_flat = feat_g_1.transpose(1, 2)
             
+            # テンソルの形状を (B, L, C) に統一する
+            if feat_g_0.dim() == 4:
+                # ブロックからの入力 (B, C, H, W) -> (B, H*W, C)
+                feat_g_0_flat = rearrange(feat_g_0, 'b c h w -> b (h w) c')
+                feat_g_1_flat = rearrange(feat_g_1, 'b c h w -> b (h w) c')
+            else:
+                # Initializer からの入力 (B, L, C) はそのまま使用
+                feat_g_0_flat = feat_g_0
+                feat_g_1_flat = feat_g_1
+
             feat_g_0_flat = F.normalize(feat_g_0_flat, p=2, dim=-1)
             feat_g_1_flat = F.normalize(feat_g_1_flat, p=2, dim=-1)
 
+            # 'bic,bjc->bij' は (B, L, C) と (B, L, C) から (B, L, L) の類似度マップを計算
             sim_matrix = torch.einsum('bic,bjc->bij', feat_g_0_flat, feat_g_1_flat)
             
-
             sim_matrix = sim_matrix / 0.1 
             
             total_geom_loss += self.compute_coarse_loss(sim_matrix, conf_gt, weight)
@@ -600,10 +607,10 @@ class ASMambaLoss(nn.Module):
         
         # 2025-10-24 ADD
         # 5. GEOMETRIC CONSISTENCY LOSS
-        if 'geom_outputs_0' in data and self.loss_config['geom_weight'] > 0:
+        if 'predict_geom_0' in data and self.loss_config['geom_weight'] > 0:
             loss_g = self.compute_geometric_loss(
-                data['geom_outputs_0'],
-                data['geom_outputs_1'],
+                data['predict_geom_0'], 
+                data['predict_geom_1'], 
                 data['conf_matrix_gt'],
                 c_weight
             )

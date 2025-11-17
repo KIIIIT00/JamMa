@@ -68,7 +68,7 @@ class AS_Mamba(nn.Module):
         # Mamba Initializer - Multi-Head version for initial global feature interaction
         self.mamba_initializer = JointMambaMultiHead(
             feature_dim=self.d_model_c, 
-            depth=1,  # Initial shallow processing
+            depth=4,  # Initial shallow processing
             d_geom=self.d_geom,
             return_geometry=True,  # Enable geometry head output
             rms_norm=True, 
@@ -220,8 +220,8 @@ class AS_Mamba(nn.Module):
         flow_predictions = []
         
         # 2025-10-24 FIXED: Geometric features lists Initialization
-        geom_outputs_0 = [data['feat_geom_0']]
-        geom_outputs_1 = [data['feat_geom_1']]
+        geom_outputs_0 = [data['feat_geom_0'].clone()]
+        geom_outputs_1 = [data['feat_geom_1'].clone()]
         
         # Iterative refinement through AS-Mamba blocks
         for block_idx, as_block in enumerate(self.as_mamba_blocks):
@@ -238,29 +238,34 @@ class AS_Mamba(nn.Module):
                 geom_outputs_1.append(data['feat_geom_1'])
                 
                 # FIXED: Properly collect and store flow predictions
-                if 'flow_map' in data:
-                    flow_map = data['flow_map']  # (2B, H, W, 4)
-                    bs = data['bs']
+                if ('flow_map_0' in data and 'flow_map_1' in data and
+                    'uncertainty_0' in data and 'uncertainty_1' in data):
                     
-                    # Split into 0→1 and 1→0
-                    flow_0to1 = flow_map[:bs]
-                    flow_1to0 = flow_map[bs:]
+                    # as_mamba_loss.py が 4-dim (flow + uncertainty) を期待しているため結合 [cite: 147-148, 156-157]
+                    flow_with_uncertainty_0 = torch.cat(
+                        [data['flow_map_0'], data['uncertainty_0']], dim=-1
+                    ) # (B, H, W, 4)
+                    flow_with_uncertainty_1 = torch.cat(
+                        [data['flow_map_1'], data['uncertainty_1']], dim=-1
+                    ) # (B, H, W, 4)
                     
                     # Store with block dimension
                     flow_predictions.append((
-                        flow_0to1.unsqueeze(0),  # (1, B, H, W, 4)
-                        flow_1to0.unsqueeze(0)
+                        flow_with_uncertainty_0.unsqueeze(0),  # (1, B, H, W, 4)
+                        flow_with_uncertainty_1.unsqueeze(0)
                     ))
         
         # FIXED: Stack all flow predictions for loss computation
+        data['predict_geom_0'] = geom_outputs_0  # List of tensors from
+        data['predict_geom_1'] = geom_outputs_1
+
         if flow_predictions:
             flows_0to1 = torch.cat([f[0] for f in flow_predictions], dim=0)  # (N_blocks, B, H, W, 4)
             flows_1to0 = torch.cat([f[1] for f in flow_predictions], dim=0)
             data['predict_flow'] = [(flows_0to1, flows_1to0)]
-            
-            # 2025-10-24 FIXED: Store all geometric features
-            data['predict_geom_0'] = geom_outputs_0  # List of tensors from
-            data['predict_geom_1'] = geom_outputs_1
+
+        data['predict_geom_0'] = geom_outputs_0  # List of tensors from
+        data['predict_geom_1'] = geom_outputs_1
         
         # Prepare for matching
         mask_c0 = mask_c1 = None

@@ -111,7 +111,6 @@ class AS_Mamba_Block(nn.Module):
         # 0. Store residual (original) features for fusion later
         feat_m_0_res = data['feat_m_0']
         feat_m_1_res = data['feat_m_1']
-
         # 1. Global Mamba
         if self.use_global_mamba:
             B, C_m, H, W = data['feat_m_0'].shape
@@ -136,13 +135,16 @@ class AS_Mamba_Block(nn.Module):
             if 'feat_geom_0' in data:
                  data['feat_g_0'] = data['feat_geom_0']
                  data['feat_g_1'] = data['feat_geom_1']
-
+        
         # 2. Flow Prediction 
-        pred_dict_0 = self.flow_predictor(data['feat_m_0'], data['feat_g_0'])
+        feat_g_0_for_flow = data['feat_g_0']
+        feat_g_1_for_flow = data['feat_g_1']
+        
+        pred_dict_0 = self.flow_predictor(data['feat_m_0'], feat_g_0_for_flow) # 保存した変数を使用
         flow_map_0 = pred_dict_0['flow']
         uncertainty_0 = pred_dict_0['uncertainty']
         
-        pred_dict_1 = self.flow_predictor(data['feat_m_1'], data['feat_g_1'])
+        pred_dict_1 = self.flow_predictor(data['feat_m_1'], feat_g_1_for_flow) # 保存した変数を使用
         flow_map_1 = pred_dict_1['flow']
         uncertainty_1 = pred_dict_1['uncertainty']
         
@@ -159,7 +161,10 @@ class AS_Mamba_Block(nn.Module):
             'spans_1': adaptive_spans_1,
         })
         
+                 
         if not self.use_local_mamba:
+            data['feat_g_0_flow_input'] = feat_g_0_for_flow
+            data['feat_g_1_flow_input'] = feat_g_1_for_flow
             return data
 
         # 4. Local Adaptive Mamba
@@ -194,8 +199,10 @@ class AS_Mamba_Block(nn.Module):
         data.update({
             'feat_m_0': feat_m_0,
             'feat_m_1': feat_m_1,
-            'feat_g_0': local_geom_0, # GeomパスはLocalMambaの出力をそのまま使用
+            'feat_g_0': local_geom_0, 
             'feat_g_1': local_geom_1,
+            'feat_g_0_flow_input': feat_g_0_for_flow, 
+            'feat_g_1_flow_input': feat_g_1_for_flow,
         })
         
         return data
