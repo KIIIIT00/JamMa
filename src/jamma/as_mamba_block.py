@@ -22,6 +22,7 @@ from typing import Dict, Optional, Tuple
 
 from .flow_predictor import FlowPredictor, AdaptiveSpanComputer
 from .mamba_module import JointMambaMultiHead
+from .mamba_module import create_multihead_block
 
 
 class AS_Mamba_Block(nn.Module):
@@ -41,7 +42,9 @@ class AS_Mamba_Block(nn.Module):
         dropout: float = 0.1,
         use_kan_flow: bool = False,
         window_size: int = 12,
-        use_checkpoint: bool = False
+        sample_size: int = 6,
+        processing_chunk_size: int = 4,
+        use_checkpoint: bool = True
     ):
         super().__init__()
         self.d_model = d_model
@@ -92,8 +95,9 @@ class AS_Mamba_Block(nn.Module):
                 depth=local_depth,
                 d_geom=d_geom,
                 dropout=dropout,
-                max_span_groups=5,
-                sample_size=8
+                scan_size=sample_size,
+                processing_chunk_size=processing_chunk_size,
+                use_checkpoint=use_checkpoint
             )
         
         self.feature_fusion = FeatureFusionFFN(
@@ -106,94 +110,114 @@ class AS_Mamba_Block(nn.Module):
         self.downsample = nn.AvgPool2d(kernel_size=2, stride=2)
         self.upsample_match = nn.ConvTranspose2d(d_model, d_model, kernel_size=2, stride=2)
         self.upsample_geom = nn.ConvTranspose2d(d_geom, d_geom, kernel_size=2, stride=2)
+    
+    def _run_global_mamba_checkpointed(self, feat_m_0, feat_m_1, feat_g_0, feat_g_1, batch_size, h, w):
+        # テンソルから一時的なデータ辞書を再構築
+        temp_data = {
+            'feat_8_0': feat_m_0.flatten(2, 3).transpose(1, 2),
+            'feat_8_1': feat_m_1.flatten(2, 3).transpose(1, 2),
+            'bs': batch_size,
+            'h_8': h,
+            'w_8': w
+        }
+        if feat_g_0 is not None:
+            temp_data['feat_geom_0'] = feat_g_0.flatten(2, 3).transpose(1, 2)
+            temp_data['feat_geom_1'] = feat_g_1.flatten(2, 3).transpose(1, 2)
+            
+        self.global_mamba(temp_data)
+        
+        # 結果のテンソルを返す
+        res_m_0 = temp_data['feat_8_0'].transpose(1, 2).reshape(batch_size, -1, h, w)
+        res_m_1 = temp_data['feat_8_1'].transpose(1, 2).reshape(batch_size, -1, h, w)
+        res_g_0 = temp_data.get('feat_geom_0', torch.zeros_like(feat_g_0)).transpose(1, 2).reshape(batch_size, -1, h, w)
+        res_g_1 = temp_data.get('feat_geom_1', torch.zeros_like(feat_g_1)).transpose(1, 2).reshape(batch_size, -1, h, w)
+        
+        return res_m_0, res_m_1, res_g_0, res_g_1
 
     def forward(self, data):
-        # 0. Store residual (original) features for fusion later
         feat_m_0_res = data['feat_m_0']
         feat_m_1_res = data['feat_m_1']
-        # 1. Global Mamba
-        if self.use_global_mamba:
-            B, C_m, H, W = data['feat_m_0'].shape
-            data['feat_8_0'] = data['feat_m_0']
-            data['feat_8_1'] = data['feat_m_1']
 
-            if 'feat_g_0' in data:
-                 data['feat_geom_0'] = data['feat_g_0']
-                 data['feat_geom_1'] = data['feat_g_1']
-            
-            # Reshape: (B, C, H, W) -> (B, H*W, C)
-            # feat_m_0 = feat_m_0.view(B, C_m, H * W).transpose(1, 2)
-            # feat_m_1 = feat_m_1.view(B, C_m, H * W).transpose(1, 2)
-            # feat_g_0 = feat_g_0.view(B, -1, H * W).transpose(1, 2)
-            # feat_g_1 = feat_g_1.view(B, -1, H * W).transpose(1, 2)
-            
-            self.global_mamba(data)
-            
-            data['feat_m_0'] = data['feat_8_0'].transpose(1, 2).reshape(B, C_m, H, W)
-            data['feat_m_1'] = data['feat_8_1'].transpose(1, 2).reshape(B, C_m, H, W)
-            
-            if 'feat_geom_0' in data:
-                 data['feat_g_0'] = data['feat_geom_0']
-                 data['feat_g_1'] = data['feat_geom_1']
-        
-        # 2. Flow Prediction 
-        feat_g_0_for_flow = data['feat_g_0']
-        feat_g_1_for_flow = data['feat_g_1']
-        
-        pred_dict_0 = self.flow_predictor(data['feat_m_0'], feat_g_0_for_flow) # 保存した変数を使用
-        flow_map_0 = pred_dict_0['flow']
+        # 1. Flow Prediction
+        pred_dict_0 = self.flow_predictor(data['feat_m_0'], data['feat_g_0'])
+        flow_0 = pred_dict_0['flow']
         uncertainty_0 = pred_dict_0['uncertainty']
+        flow_with_uncertainty_0 = pred_dict_0['flow_with_uncertainty']
         
-        pred_dict_1 = self.flow_predictor(data['feat_m_1'], feat_g_1_for_flow) # 保存した変数を使用
-        flow_map_1 = pred_dict_1['flow']
+        pred_dict_1 = self.flow_predictor(data['feat_m_1'], data['feat_g_1'])
+        flow_1 = pred_dict_1['flow']
         uncertainty_1 = pred_dict_1['uncertainty']
+        flow_with_uncertainty_1 = pred_dict_1['flow_with_uncertainty']
         
-        # 3. Compute Adaptive Spans
-        adaptive_spans_0 = self.span_computer(flow_map_0, uncertainty_0)
-        adaptive_spans_1 = self.span_computer(flow_map_1, uncertainty_1)
+        adaptive_spans_0 = self.span_computer(flow_0, uncertainty_0)
+        adaptive_spans_1 = self.span_computer(flow_1, uncertainty_1)
 
         data.update({
-            'flow_map_0': flow_map_0,
-            'flow_map_1': flow_map_1,
-            'uncertainty_0': uncertainty_0, 
+            'flow_map_0': flow_with_uncertainty_0,
+            'flow_map_1': flow_with_uncertainty_1,
+            'uncertainty_0': uncertainty_0,
             'uncertainty_1': uncertainty_1,
             'spans_0': adaptive_spans_0,
             'spans_1': adaptive_spans_1,
         })
-        
-                 
+
+        # 2. Global Mamba (WITH CHECKPOINTING)
+        if self.use_global_mamba:
+            B, C_m, H, W = data['feat_m_0'].shape
+            
+            if self.use_checkpoint and self.training:
+                # ★★★ Global Mamba をチェックポイント実行 ★★★
+                # これにより約8GBのメモリが節約されます
+                feat_m_0, feat_m_1, feat_g_0, feat_g_1 = checkpoint(
+                    self._run_global_mamba_checkpointed,
+                    data['feat_m_0'],
+                    data['feat_m_1'],
+                    data.get('feat_g_0'),
+                    data.get('feat_g_1'),
+                    B, H, W
+                )
+            else:
+                # 通常実行
+                feat_m_0, feat_m_1, feat_g_0, feat_g_1 = self._run_global_mamba_checkpointed(
+                    data['feat_m_0'],
+                    data['feat_m_1'],
+                    data.get('feat_g_0'),
+                    data.get('feat_g_1'),
+                    B, H, W
+                )
+            
+            data['feat_m_0'] = feat_m_0
+            data['feat_m_1'] = feat_m_1
+            if 'feat_g_0' in data:
+                 data['feat_g_0'] = feat_g_0
+                 data['feat_g_1'] = feat_g_1
+
         if not self.use_local_mamba:
-            data['feat_g_0_flow_input'] = feat_g_0_for_flow
-            data['feat_g_1_flow_input'] = feat_g_1_for_flow
             return data
 
-        # 4. Local Adaptive Mamba
+        # 3. Local Adaptive Mamba (Already checkpointed internally)
         local_match_0, local_match_1, local_geom_0, local_geom_1 = self.local_mamba(
             feat_match_0=data['feat_m_0'],
             feat_match_1=data['feat_m_1'],
             feat_geom_0=data['feat_g_0'],
             feat_geom_1=data['feat_g_1'],
-            flow_map_0=flow_map_0,
-            flow_map_1=flow_map_1,
+            flow_map_0=flow_0,
+            flow_map_1=flow_1,
             adaptive_spans_x_0=adaptive_spans_0[0],
             adaptive_spans_y_0=adaptive_spans_0[1],
             adaptive_spans_x_1=adaptive_spans_1[0],
             adaptive_spans_y_1=adaptive_spans_1[1]
         )
         
-        # 5. Feature Fusion
-        feat_m_0_res = feat_m_0_res.unsqueeze(1)
-        local_match_0 = local_match_0.unsqueeze(1)
-        
-        feat_m_1_res = feat_m_1_res.unsqueeze(1)
-        local_match_1 = local_match_1.unsqueeze(1)
-
-        # (B, 1, C, H, W) + (B, 1, C, H, W) -> (B, 2, C, H, W)
-        # (num_streams=2 を想定)
-        combined_0 = torch.cat([feat_m_0_res, local_match_0], dim=1)
-        combined_1 = torch.cat([feat_m_1_res, local_match_1], dim=1)
-
+        # 4. Feature Fusion
+        feat_m_0_res_unsqueezed = feat_m_0_res.unsqueeze(1)
+        local_match_0_unsqueezed = local_match_0.unsqueeze(1)
+        combined_0 = torch.cat([feat_m_0_res_unsqueezed, local_match_0_unsqueezed], dim=1)
         feat_m_0 = self.feature_fusion(combined_0)
+
+        feat_m_1_res_unsqueezed = feat_m_1_res.unsqueeze(1)
+        local_match_1_unsqueezed = local_match_1.unsqueeze(1)
+        combined_1 = torch.cat([feat_m_1_res_unsqueezed, local_match_1_unsqueezed], dim=1)
         feat_m_1 = self.feature_fusion(combined_1)
         
         data.update({
@@ -201,8 +225,6 @@ class AS_Mamba_Block(nn.Module):
             'feat_m_1': feat_m_1,
             'feat_g_0': local_geom_0, 
             'feat_g_1': local_geom_1,
-            'feat_g_0_flow_input': feat_g_0_for_flow, 
-            'feat_g_1_flow_input': feat_g_1_for_flow,
         })
         
         return data
@@ -254,16 +276,14 @@ class FeatureFusionFFN(nn.Module):
         
         return out
 
-
 class LocalAdaptiveMamba(nn.Module):
     """
-    Local Mamba with TRUE adaptive spans - FULLY FIXED VERSION.
+    Local Mamba with ASpanFormer-style Adaptive Spans + 4-Way Spatial Scan.
     
-    Key fixes:
-    1. Proper window aggregation using weighted average
-    2. Position assignment tracking
-    3. Vectorized operations
-    4. Consistent dropout
+    Features:
+    - Adaptive Scan: Dynamically extracts patches based on predicted flow and uncertainty.
+    - 4-Way Scan: Processes patches in 4 directions (H-Fwd, H-Bwd, V-Fwd, V-Bwd).
+    - Ultimate OOM Safety: Checkpoints the ENTIRE chunk processing logic.
     """
     
     def __init__(
@@ -272,66 +292,57 @@ class LocalAdaptiveMamba(nn.Module):
         depth: int = 4,
         d_geom: int = 64,
         dropout: float = 0.1,
-        max_span_groups: int = 5,
-        sample_size: int = 8,
-        processing_chunck_size: int = 1024
+        scan_size: int = 10,
+        processing_chunk_size: int = 32,
+        use_checkpoint: bool = True
     ):
         super().__init__()
         self.feature_dim = feature_dim
         self.d_geom = d_geom
-        self.max_span_groups = max_span_groups
-        self.sample_size = sample_size
-        self.chunk_size = processing_chunck_size
-        self.seq_len = sample_size ** 2
-        
-        from .mamba_module import create_multihead_block
-        
-        # self.span_groups = [5, 7, 9, 11, 15]
-        self.span_groups = [5, 9, 15]
-        # self.mamba_blocks = nn.ModuleDict({
-        #     f'span_{s}': nn.ModuleList([
-        #         create_multihead_block(
-        #             d_model=feature_dim,
-        #             d_geom=d_geom,
-        #             rms_norm=False,
-        #             residual_in_fp32=True,
-        #             layer_idx=i
-        #         )
-        #         for i in range(depth)
-        #     ])
-        #     for s in self.span_groups
-        # })
-        self.mamba_blocks = nn.ModuleList({
-            # f'span_{s}': nn.ModuleList([
-                create_multihead_block(
-                    d_model=feature_dim,
-                    d_geom=d_geom,
-                    rms_norm=True,
-                    residual_in_fp32=True,
-                    layer_idx=i,
-                    block_type='dual_input'  
-                )
-                for i in range(depth)
-            # ])
-            # for s in self.span_groups
-        })
+        self.scan_size = scan_size
+        self.max_seq_len = scan_size ** 2
+        self.chunk_size = processing_chunk_size
+        self.use_checkpoint = use_checkpoint
+
+        # 4方向スキャン用Mambaモデル
+        self.mamba_blocks_h_fwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+        self.mamba_blocks_h_bwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+        self.mamba_blocks_v_fwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+        self.mamba_blocks_v_bwd = self._create_mamba_stack(depth, feature_dim, d_geom)
         
         self.dropout = nn.Dropout(dropout)
-
-        grid_x, grid_y = torch.meshgrid(
-            torch.linspace(-1, 1, sample_size),
-            torch.linspace(-1, 1, sample_size),
+        
+        # ベースグリッド
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(-1, 1, scan_size),
+            torch.linspace(-1, 1, scan_size),
             indexing='ij'
         )
-
         self.base_grid = nn.Parameter(
             torch.stack([grid_x, grid_y], dim=-1).float(),
             requires_grad=False
         )
-        
-        # REMOVED: Complex aggregators not needed with better aggregation
-        # Using simple averaging is more stable and interpretable
-        
+
+    def _create_mamba_stack(self, depth, d_model, d_geom):
+        return nn.ModuleList([
+            create_multihead_block(
+                d_model=d_model,
+                d_geom=d_geom,
+                rms_norm=True,
+                residual_in_fp32=True,
+                layer_idx=i,
+                block_type='dual_input'
+            )
+            for i in range(depth)
+        ])
+
+    def _run_mamba_stack(self, stack, seq_match, seq_geom):
+        for block in stack:
+            seq_match, seq_geom = block(seq_match, seq_geom)
+            seq_match = self.dropout(seq_match)
+            seq_geom = self.dropout(seq_geom)
+        return seq_match, seq_geom
+
     def forward(
         self,
         feat_match_0: torch.Tensor,
@@ -345,39 +356,21 @@ class LocalAdaptiveMamba(nn.Module):
         adaptive_spans_x_1: torch.Tensor,
         adaptive_spans_y_1: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Process with position-adaptive spans."""
-        B, C, H, W = feat_match_0.shape
         
-        # processed_0 = self._process_adaptive_windows(
-        #     feat_match_0, feat_geom_0,
-        #     flow_map_0[..., :2], 
-        #     # flow_map_0[..., 2:],
-        #     adaptive_spans_x_0, adaptive_spans_y_0,
-        #     feat_match_1, feat_geom_1
-        # )
-        
-        # processed_1 = self._process_adaptive_windows(
-        #     feat_match_1, feat_geom_1,
-        #     flow_map_1[..., :2], 
-        #     # flow_map_1[..., 2:],
-        #     adaptive_spans_x_1, adaptive_spans_y_1,
-        #     feat_match_0, feat_geom_0
-        # )
         processed_0 = self._process_adaptive_windows(
             feat_match_query=feat_match_0,
             feat_geom_query=feat_geom_0,
-            flow=flow_map_0[..., :2],
+            flow=flow_map_0,
             spans_x=adaptive_spans_x_0,
             spans_y=adaptive_spans_y_0,
             target_feat_match=feat_match_1,
             target_feat_geom=feat_geom_1
         )
         
-        # Process 1 -> 0
         processed_1 = self._process_adaptive_windows(
             feat_match_query=feat_match_1,
             feat_geom_query=feat_geom_1,
-            flow=flow_map_1[..., :2],
+            flow=flow_map_1,
             spans_x=adaptive_spans_x_1,
             spans_y=adaptive_spans_y_1,
             target_feat_match=feat_match_0,
@@ -387,133 +380,120 @@ class LocalAdaptiveMamba(nn.Module):
         return processed_0['match'], processed_1['match'], \
                processed_0['geom'], processed_1['geom']
     
-    # def _process_adaptive_windows(
-    #     self,
-    #     feat_match_query: torch.Tensor,
-    #     feat_geom_query: torch.Tensor,
-    #     flow: torch.Tensor,
-    #     spans_x: torch.Tensor,
-    #     spans_y: torch.Tensor,
-    #     target_feat_match: torch.Tensor,
-    #     target_feat_geom: torch.Tensor
-    # ) -> dict:
-    #     """
-    #     Extracts and processes windows using ASpanFormer-style
-    #     fixed-length sampling from continuous-sized spans.
-    #     """
-    #     B, C_match, H_q, W_q = feat_match_query.shape
-    #     _, C_geom, _, _ = feat_geom_query.shape
-    #     N = H_q * W_q # Total number of pixels to process (e.g., 10816)
+    def _process_chunk_op(
+        self,
+        query_match_chunk: torch.Tensor,
+        query_geom_chunk: torch.Tensor,
+        target_feat_match: torch.Tensor,
+        target_feat_geom: torch.Tensor,
+        flow_chunk: torch.Tensor,
+        spans_x_chunk: torch.Tensor,
+        spans_y_chunk: torch.Tensor,
+        query_coords_chunk: torch.Tensor,
+        batch_indices_chunk: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Atomic operation for processing a single chunk.
+        This entire function will be checkpointed to save memory.
         
-    #     # 1. Flatten all query inputs for chunking
-    #     # (B, C, H, W) -> (B*N, C)
-    #     feat_match_query_flat = rearrange(feat_match_query, 'b c h w -> (b h w) c')
-    #     feat_geom_query_flat = rearrange(feat_geom_query, 'b c h w -> (b h w) c')
+        It performs:
+        1. Dynamic Patch Extraction
+        2. 4-Way Spatial Scanning
+        3. Mamba Processing
+        4. Aggregation
+        """
+        # 1. Extract Patches
+        patches_match = self._extract_dynamic_patches(
+            target_feat_match, flow_chunk, spans_x_chunk, spans_y_chunk,
+            query_coords_chunk, batch_indices_chunk
+        )
+        patches_geom = self._extract_dynamic_patches(
+            target_feat_geom, flow_chunk, spans_x_chunk, spans_y_chunk,
+            query_coords_chunk, batch_indices_chunk
+        )
+
+        # 2. Prepare 4-Way Scans
+        # (chunk_size, L_max, C)
+        kv_m_h_fwd = rearrange(patches_match, 'b c h w -> b (h w) c')
+        kv_g_h_fwd = rearrange(patches_geom, 'b c h w -> b (h w) c')
         
-    #     # (B, H, W, 2) -> (B*N, 2)
-    #     flow_flat = rearrange(flow, 'b h w c -> (b h w) c')
-    #     # (B, H, W) -> (B*N)
-    #     spans_x_flat = rearrange(spans_x, 'b h w -> (b h w)')
-    #     spans_y_flat = rearrange(spans_y, 'b h w -> (b h w)')
+        kv_m_h_bwd = torch.flip(kv_m_h_fwd, dims=[1])
+        kv_g_h_bwd = torch.flip(kv_g_h_fwd, dims=[1])
         
-    #     # Get query pixel coordinates (for flow offset)
-    #     coord_y, coord_x = torch.meshgrid(
-    #         torch.linspace(-1, 1, H_q, device=feat_match_query.device),
-    #         torch.linspace(-1, 1, W_q, device=feat_match_query.device),
-    #         indexing='ij'
-    #     )
-    #     # (H, W, 2) -> (N, 2)
-    #     query_coords_flat = rearrange(
-    #         torch.stack([coord_x, coord_y], dim=-1), 'h w c -> (h w) c'
-    #     )
-    #     if B > 1:
-    #         query_coords_flat = query_coords_flat.repeat(B, 1)
-
-    #     # 2. Prepare output buffers
-    #     output_match_flat = torch.zeros_like(feat_match_query_flat)
-    #     output_geom_flat = torch.zeros_like(feat_geom_query_flat)
-
-    #     # 3. Process in chunks
-    #     for i in range(0, N * B, self.chunk_size):
-    #         # Define the current chunk
-    #         chunk_slice = slice(i, i + self.chunk_size)
-            
-    #         fm_chunk_in = feat_match_query_flat[chunk_slice]
-    #         fg_chunk_in = feat_geom_query_flat[chunk_slice]
-            
-    #         # 3.1. Extract windows FOR THIS CHUNK
-    #         windows_match_chunk = self._extract_chunk_grid_sample(
-    #             target_feat_match, # Full target map
-    #             flow_flat[chunk_slice],
-    #             spans_x_flat[chunk_slice],
-    #             spans_y_flat[chunk_slice],
-    #             query_coords_flat[chunk_slice]
-    #         ) # Shape: (chunk_size, seq_len, C_match)
-            
-    #         windows_geom_chunk = self._extract_chunk_grid_sample(
-    #             target_feat_geom, # Full target map
-    #             flow_flat[chunk_slice],
-    #             spans_x_flat[chunk_slice],
-    #             spans_y_flat[chunk_slice],
-    #             query_coords_flat[chunk_slice]
-    #         ) # Shape: (chunk_size, seq_len, C_geom)
-
-    #         # 3.2. Process chunk through Mamba
-    #         # These tensors are small (e.g., [1024, 64, 128]), no OOM
-    #         for block in self.mamba_blocks:
-    #             windows_match_chunk, windows_geom_chunk = block(
-    #                 windows_match_chunk, windows_geom_chunk
-    #             )
-    #             windows_match_chunk = self.dropout(windows_match_chunk)
-    #             windows_geom_chunk = self.dropout(windows_geom_chunk)
-
-    #         # 3.3. Aggregate chunk results and add residual
-    #         out_m_chunk = torch.mean(windows_match_chunk, dim=1)
-    #         out_g_chunk = torch.mean(windows_geom_chunk, dim=1)
-            
-    #         output_match_flat[chunk_slice] = fm_chunk_in + out_m_chunk
-    #         output_geom_flat[chunk_slice] = fg_chunk_in + out_g_chunk
-
-    #     # 4. Reshape back to image format
-    #     output_match = rearrange(
-    #         output_match_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
-    #     )
-    #     output_geom = rearrange(
-    #         output_geom_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
-    #     )
+        kv_m_v_fwd = rearrange(patches_match.transpose(2, 3), 'b c w h -> b (w h) c')
+        kv_g_v_fwd = rearrange(patches_geom.transpose(2, 3), 'b c w h -> b (w h) c')
         
-    #     return {'match': output_match, 'geom': output_geom}
-    # as_mamba_block.py の
-    # _process_adaptive_windows メソッドを以下に置き換えてください。
+        kv_m_v_bwd = torch.flip(kv_m_v_fwd, dims=[1])
+        kv_g_v_bwd = torch.flip(kv_g_v_fwd, dims=[1])
+
+        # 3. Run Mamba (Sequentially)
+        # Note: Since this whole function is checkpointed, we don't need inner checkpoints.
+        
+        seq_m = torch.cat([query_match_chunk, kv_m_h_fwd], dim=1)
+        seq_g = torch.cat([query_geom_chunk, kv_g_h_fwd], dim=1)
+        if self.use_checkpoint and self.training:
+             out_m_h_fwd, out_g_h_fwd = checkpoint(self._run_mamba_stack, self.mamba_blocks_h_fwd, seq_m, seq_g)
+        else:
+             out_m_h_fwd, out_g_h_fwd = self._run_mamba_stack(self.mamba_blocks_h_fwd, seq_m, seq_g)
+
+        # H-Bwd
+        seq_m = torch.cat([query_match_chunk, kv_m_h_bwd], dim=1)
+        seq_g = torch.cat([query_geom_chunk, kv_g_h_bwd], dim=1)
+        if self.use_checkpoint and self.training:
+             out_m_h_bwd, out_g_h_bwd = checkpoint(self._run_mamba_stack, self.mamba_blocks_h_bwd, seq_m, seq_g)
+        else:
+             out_m_h_bwd, out_g_h_bwd = self._run_mamba_stack(self.mamba_blocks_h_bwd, seq_m, seq_g)
+        
+        # V-Fwd
+        seq_m = torch.cat([query_match_chunk, kv_m_v_fwd], dim=1)
+        seq_g = torch.cat([query_geom_chunk, kv_g_v_fwd], dim=1)
+        if self.use_checkpoint and self.training:
+             out_m_v_fwd, out_g_v_fwd = checkpoint(self._run_mamba_stack, self.mamba_blocks_v_fwd, seq_m, seq_g)
+        else:
+             out_m_v_fwd, out_g_v_fwd = self._run_mamba_stack(self.mamba_blocks_v_fwd, seq_m, seq_g)
+        
+        # V-Bwd
+        seq_m = torch.cat([query_match_chunk, kv_m_v_bwd], dim=1)
+        seq_g = torch.cat([query_geom_chunk, kv_g_v_bwd], dim=1)
+        if self.use_checkpoint and self.training:
+             out_m_v_bwd, out_g_v_bwd = checkpoint(self._run_mamba_stack, self.mamba_blocks_v_bwd, seq_m, seq_g)
+        else:
+             out_m_v_bwd, out_g_v_bwd = self._run_mamba_stack(self.mamba_blocks_v_bwd, seq_m, seq_g)
+
+        # 4. Aggregate (Average)
+        # Extract updated query token (index 0)
+        out_m_chunk = (out_m_h_fwd[:, 0, :] + out_m_h_bwd[:, 0, :] + 
+                       out_m_v_fwd[:, 0, :] + out_m_v_bwd[:, 0, :]) / 4.0
+                       
+        out_g_chunk = (out_g_h_fwd[:, 0, :] + out_g_h_bwd[:, 0, :] + 
+                       out_g_v_fwd[:, 0, :] + out_g_v_bwd[:, 0, :]) / 4.0
+        
+        return out_m_chunk, out_g_chunk
 
     def _process_adaptive_windows(
         self,
         feat_match_query: torch.Tensor,
-        feat_geom_query: torch.Tensor, # (B, C_geom, H_q, W_q)
+        feat_geom_query: torch.Tensor,
         flow: torch.Tensor,
         spans_x: torch.Tensor,
         spans_y: torch.Tensor,
         target_feat_match: torch.Tensor,
         target_feat_geom: torch.Tensor
-    ) -> dict:
-        """
-        FIXED (Version 4): 
-        1. Implements Mamba-based Cross-Attention for *both* match and geom paths
-           (Query Prepending) to fix all 'grad' errors.
-        2. Maintains chunking to prevent OOM.
-        """
+    ) -> Dict[str, torch.Tensor]:
+        
         B, C_match, H_q, W_q = feat_match_query.shape
         _, C_geom, _, _ = feat_geom_query.shape
-        N = H_q * W_q 
+        N = H_q * W_q
         
-        # 1. Flatten all query inputs for chunking
+        # Flatten inputs
         feat_match_query_flat = rearrange(feat_match_query, 'b c h w -> (b h w) c')
         feat_geom_query_flat = rearrange(feat_geom_query, 'b c h w -> (b h w) c')
-        
         flow_flat = rearrange(flow, 'b h w c -> (b h w) c')
         spans_x_flat = rearrange(spans_x, 'b h w -> (b h w)')
         spans_y_flat = rearrange(spans_y, 'b h w -> (b h w)')
         
+        batch_indices_flat = torch.arange(B * N, device=feat_match_query.device) // N
+
         coord_y, coord_x = torch.meshgrid(
             torch.linspace(-1, 1, H_q, device=feat_match_query.device),
             torch.linspace(-1, 1, W_q, device=feat_match_query.device),
@@ -525,232 +505,626 @@ class LocalAdaptiveMamba(nn.Module):
         if B > 1:
             query_coords_flat = query_coords_flat.repeat(B, 1)
 
-        # 2. Prepare output buffers
         output_match_flat = torch.zeros_like(feat_match_query_flat)
         output_geom_flat = torch.zeros_like(feat_geom_query_flat)
 
-        # 3. Process in chunks (OOM対策)
-        for i in range(0, N * B, self.chunk_size):
+        for i in range(0, B * N, self.chunk_size):
             chunk_slice = slice(i, i + self.chunk_size)
             
-            # === Query Tokens ===
+            # Inputs for this chunk
             query_match_chunk = feat_match_query_flat[chunk_slice].unsqueeze(1)
             query_geom_chunk = feat_geom_query_flat[chunk_slice].unsqueeze(1)
             
-            # === Key/Value Tokens (Match) ===
-            windows_match_chunk = self._extract_chunk_grid_sample(
-                target_feat_match, 
-                flow_flat[chunk_slice],
-                spans_x_flat[chunk_slice],
-                spans_y_flat[chunk_slice],
-                query_coords_flat[chunk_slice]
-            ) # Shape: (chunk_size, seq_len, C_match)
-            
-            # === Key/Value Tokens (Geom) (FIXED: 'grad is None' 対策) ===
-            windows_geom_chunk = self._extract_chunk_grid_sample(
-                target_feat_geom, # 本物のgeom特徴をサンプリング
-                flow_flat[chunk_slice],
-                spans_x_flat[chunk_slice],
-                spans_y_flat[chunk_slice],
-                query_coords_flat[chunk_slice]
-            ) # Shape: (chunk_size, seq_len, C_geom)
+            # Execute chunk operation
+            # Checkpointing is applied to the ENTIRE chunk operation
+            # This ensures that intermediate tensors (patches, sequences) are discarded.
+            if self.use_checkpoint and self.training:
+                out_m_chunk, out_g_chunk = checkpoint(
+                    self._process_chunk_op,
+                    query_match_chunk,
+                    query_geom_chunk,
+                    target_feat_match, # Reference (grad tracked)
+                    target_feat_geom,  # Reference (grad tracked)
+                    flow_flat[chunk_slice],
+                    spans_x_flat[chunk_slice],
+                    spans_y_flat[chunk_slice],
+                    query_coords_flat[chunk_slice],
+                    batch_indices_flat[chunk_slice]
+                )
+            else:
+                out_m_chunk, out_g_chunk = self._process_chunk_op(
+                    query_match_chunk,
+                    query_geom_chunk,
+                    target_feat_match,
+                    target_feat_geom,
+                    flow_flat[chunk_slice],
+                    spans_x_flat[chunk_slice],
+                    spans_y_flat[chunk_slice],
+                    query_coords_flat[chunk_slice],
+                    batch_indices_flat[chunk_slice]
+                )
 
-            # === Cross-Attention (Query Prepending) ===
-            seq_match = torch.cat([query_match_chunk, windows_match_chunk], dim=1)
-            seq_geom = torch.cat([query_geom_chunk, windows_geom_chunk], dim=1)
-            
-            for block in self.mamba_blocks:
-                # 両方のパスをMamba で処理
-                seq_match, seq_geom = block(seq_match, seq_geom) 
-                seq_match = self.dropout(seq_match)
-                seq_geom = self.dropout(seq_geom)
-
-            # === Aggregation (両方のパス) ===
-            out_m_chunk = seq_match[:, 0, :] # 更新されたQueryトークン
-            out_g_chunk = seq_geom[:, 0, :] # 更新されたQueryトークン
-            
+            # Residual connection
             output_match_flat[chunk_slice] = query_match_chunk.squeeze(1) + out_m_chunk
             output_geom_flat[chunk_slice] = query_geom_chunk.squeeze(1) + out_g_chunk
 
-        # 4. Reshape back to image format
-        output_match = rearrange(
-            output_match_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
-        )
-        output_geom = rearrange(
-            output_geom_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
-        )
+        output_match = rearrange(output_match_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q)
+        output_geom = rearrange(output_geom_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q)
         
         return {'match': output_match, 'geom': output_geom}
 
-    
-    def _extract_chunk_grid_sample(
+    def _extract_dynamic_patches(
         self,
-        features_target: torch.Tensor, # (B, C, H_t, W_t)
-        flow_chunk: torch.Tensor,      # (chunk_size, 2) - (x, y) flow offset
-        spans_x_chunk: torch.Tensor,   # (chunk_size)
-        spans_y_chunk: torch.Tensor,   # (chunk_size)
-        query_coords_chunk: torch.Tensor # (chunk_size, 2)
+        features_target: torch.Tensor,
+        flow_chunk: torch.Tensor,
+        spans_x_chunk: torch.Tensor,
+        spans_y_chunk: torch.Tensor,
+        query_coords_chunk: torch.Tensor,
+        batch_indices_chunk: torch.Tensor
     ) -> torch.Tensor:
         """
-        Vectorized ASpanFormer-style extraction for a CHUNK of pixels.
+        Extract dense patches using grid_sample with dynamic scales.
         """
         B_feat, C, H_t, W_t = features_target.shape
-        # B_feat is the *original* batch size (e.g., 1)
-        
         chunk_size = flow_chunk.shape[0]
-        device = features_target.device
+        S = self.scan_size
+        device = features_target.device # Fixed NameError
         
-        # --- 1. Create grid for this chunk ---
-        
-        # Denormalize flow from pixel-space to [-1, 1] space
         flow_norm = flow_chunk.clone()
         flow_norm[..., 0] = 2.0 * flow_chunk[..., 0] / (W_t - 1)
         flow_norm[..., 1] = 2.0 * flow_chunk[..., 1] / (H_t - 1)
         
-        # Center of sampling grid: query_coord + flow
-        # (chunk_size, 2)
         centers = query_coords_chunk + flow_norm
         
-        # Normalize spans from pixel-space to [0, 2] space
         scales_x = 2.0 * spans_x_chunk / (W_t - 1)
         scales_y = 2.0 * spans_y_chunk / (H_t - 1)
-        scales = torch.stack([scales_x, scales_y], dim=-1) # (chunk_size, 2)
+        scales = torch.stack([scales_x, scales_y], dim=-1)
 
-        # --- 2. Scale and shift the base grid ---
-        seq_len = self.seq_len
-        # (1, seq_len, 2)
-        base_grid_flat = self.base_grid.view(1, seq_len, 2)
+        base_grid_flat = self.base_grid.view(1, self.max_seq_len, 2)
+        scales = scales.unsqueeze(1)
+        centers = centers.unsqueeze(1)
         
-        scales = scales.unsqueeze(1)    # (chunk_size, 1, 2)
-        centers = centers.unsqueeze(1)  # (chunk_size, 1, 2)
-        
-        # grid shape: (chunk_size, seq_len, 2)
         grid = base_grid_flat * scales + centers
         
-        # --- 3. Sample from features ---
+        patches = torch.zeros(chunk_size, C, S, S, device=device, dtype=features_target.dtype)
         
-        # We assume B_feat (from features_target) is 1.
-        # If B_feat > 1, this logic needs to be more complex
-        # (matching chunk indices to batch indices).
-        # But for training (B=1 per GPU), this is fine.
-        if B_feat > 1:
-            # TODO: This requires indexing features_target with batch indices
-            # For now, we assume B=1, which is common.
-            pass
+        unique_batches = torch.unique(batch_indices_chunk)
+        
+        for b in unique_batches:
+            mask = (batch_indices_chunk == b)
+            sub_grid = grid[mask]
+            k = sub_grid.shape[0]
             
-        # grid_sample expects grid (B, H_out, W_out, 2)
-        # We reshape grid to: (1, chunk_size, seq_len, 2)
-        grid = grid.view(1, chunk_size, seq_len, 2)
+            feature_b = features_target[b:b+1]
+            feature_b_expanded = feature_b.expand(k, -1, -1, -1)
+            sub_grid_reshaped = sub_grid.view(k, S, S, 2)
             
-        # Perform sampling
-        # window: (1, C, chunk_size, seq_len)
-        window = F.grid_sample(
-            features_target,    # Input (B=1, C, H_t, W_t)
-            grid,               # Grid (B=1, chunk_size, seq_len, 2)
-            mode='bilinear',
-            align_corners=True, 
-            padding_mode='zeros'
-        )
-        
-        # Reshape for Mamba: (1, C, chunk_size, seq_len) -> (chunk_size, seq_len, C)
-        window = window.permute(0, 2, 3, 1).view(chunk_size, seq_len, C)
-        
-        return window
-
-    
-    def _extract_windows_grid_sample_scaled(
-        self,
-        features_target: torch.Tensor, # (B, C, H_t, W_t)
-        flow: torch.Tensor,            # (B, H_q, W_q, 2) - (x, y) flow
-        spans_x: torch.Tensor,         # (B, H_q, W_q) - adaptive physical width
-        spans_y: torch.Tensor          # (B, H_q, W_q) - adaptive physical height
-    ) -> torch.Tensor:
-        """
-        Vectorized ASpanFormer-style window extraction.
-        
-        FIXED: Resolves grid_sampler batch size mismatch error.
-        """
-        B, C, H_t, W_t = features_target.shape
-        _, H_q, W_q, _ = flow.shape
-        
-        device = features_target.device
-        
-        # --- 1. Create pixel-wise sampling grid ---
-        
-        # Get query pixel coordinates (normalized [-1, 1])
-        coord_y, coord_x = torch.meshgrid(
-            torch.linspace(-1, 1, H_q, device=device),
-            torch.linspace(-1, 1, W_q, device=device),
-            indexing='ij'
-        )
-        query_coords = torch.stack([coord_x, coord_y], dim=-1)
-        
-        # Denormalize flow from pixel-space to [-1, 1] space
-        flow_norm = flow.clone()
-        flow_norm[..., 0] = 2.0 * flow[..., 0] / (W_t - 1)
-        flow_norm[..., 1] = 2.0 * flow[..., 1] / (H_t - 1)
-        
-        # Center of sampling grid: query_coord + flow
-        centers = query_coords.unsqueeze(0) + flow_norm # (B, H_q, W_q, 2)
-        
-        # Scale of sampling grid: spans_x/y
-        scales_x = 2.0 * spans_x / (W_t - 1)
-        scales_y = 2.0 * spans_y / (H_t - 1)
-        scales = torch.stack([scales_x, scales_y], dim=-1) # (B, H_q, W_q, 2)
-
-        # --- 2. Scale and shift the base grid ---
-        seq_len = self.seq_len
-        # (1, 1, 1, seq_len, 2)
-        base_grid_flat = self.base_grid.view(1, 1, 1, seq_len, 2)
-        
-        scales = scales.unsqueeze(-2)    # (B, H_q, W_q, 1, 2)
-        centers = centers.unsqueeze(-2)  # (B, H_q, W_q, 1, 2)
-        
-        # grid shape: (B, H_q, W_q, seq_len, 2)
-        grid = base_grid_flat * scales + centers
-        
-        # --- 3. Sample from features (Looping over Batch B) ---
-        
-        N = H_q * W_q # Number of query pixels (e.g., 16*16=256)
-        
-        all_windows = []
-        for b in range(B):
-            # Get features for this batch item
-            # features_b: (1, C, H_t, W_t)
-            features_b = features_target[b:b+1]
-            
-            # Get grid for this batch item
-            # grid_b: (H_q, W_q, seq_len, 2)
-            grid_b = grid[b]
-            
-            # Reshape grid for F.grid_sample
-            # We want B_out=1, H_out=N, W_out=seq_len
-            # ** FIX IS HERE **
-            # grid_b_reshaped: (1, N, seq_len, 2)
-            # (e.g., [1, 256, 64, 2])
-            grid_b_reshaped = grid_b.view(1, N, seq_len, 2)
-            
-            # Perform sampling
-            # window_b: (1, C, N, seq_len)
-            window_b = F.grid_sample(
-                features_b,         # Input (B=1)
-                grid_b_reshaped,    # Grid (B=1)
+            sub_patches = F.grid_sample(
+                feature_b_expanded,
+                sub_grid_reshaped,
                 mode='bilinear',
-                align_corners=True, # Use True, consistent with LoFTR/ASpanFormer
+                align_corners=True, 
                 padding_mode='zeros'
             )
-            all_windows.append(window_b)
+            patches[mask] = sub_patches
+            
+        return patches
+    
+# class LocalAdaptiveMamba(nn.Module):
+#     """
+#     Local Mamba with TRUE adaptive spans - FULLY FIXED VERSION.
+    
+#     Key fixes:
+#     1. Proper window aggregation using weighted average
+#     2. Position assignment tracking
+#     3. Vectorized operations
+#     4. Consistent dropout
+#     """
+    
+#     def __init__(
+#         self,
+#         feature_dim: int = 256,
+#         depth: int = 4,
+#         d_geom: int = 64,
+#         dropout: float = 0.1,
+#         max_span_groups: int = 5,
+#         scan_size: int = 10,
+#         processing_chunck_size: int = 1024
+#     ):
+#         super().__init__()
+#         self.feature_dim = feature_dim
+#         self.d_geom = d_geom
+#         self.max_span_groups = max_span_groups
+#         self.scan_size = scan_size
+#         self.max_seq_len = scan_size ** 2
+#         self.chunk_size = processing_chunck_size
         
-        # windows: (B, C, N, seq_len)
-        windows = torch.cat(all_windows, dim=0)
+#         # Sequence length for Mamba blocks
+#         self.mamba_blocks_h_fwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+#         self.mamba_blocks_h_bwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+#         self.mamba_blocks_v_fwd = self._create_mamba_stack(depth, feature_dim, d_geom)
+#         self.mamba_blocks_v_bwd = self._create_mamba_stack(depth, feature_dim, d_geom)
         
-        # Reshape for Mamba: (B, C, N, seq_len) -> (B, N, seq_len, C)
-        windows = windows.permute(0, 2, 3, 1)
+#         from .mamba_module import create_multihead_block
         
-        # Flatten B and N: (B * N, seq_len, C)
-        windows = windows.reshape(B * N, seq_len, C)
+#         # self.span_groups = [5, 7, 9, 11, 15]
+#         self.span_groups = [5, 9, 15]
+#         # self.mamba_blocks = nn.ModuleDict({
+#         #     f'span_{s}': nn.ModuleList([
+#         #         create_multihead_block(
+#         #             d_model=feature_dim,
+#         #             d_geom=d_geom,
+#         #             rms_norm=False,
+#         #             residual_in_fp32=True,
+#         #             layer_idx=i
+#         #         )
+#         #         for i in range(depth)
+#         #     ])
+#         #     for s in self.span_groups
+#         # })
+#         self.mamba_blocks = nn.ModuleList({
+#             # f'span_{s}': nn.ModuleList([
+#                 create_multihead_block(
+#                     d_model=feature_dim,
+#                     d_geom=d_geom,
+#                     rms_norm=True,
+#                     residual_in_fp32=True,
+#                     layer_idx=i,
+#                     block_type='dual_input'  
+#                 )
+#                 for i in range(depth)
+#             # ])
+#             # for s in self.span_groups
+#         })
         
-        return windows
+#         self.dropout = nn.Dropout(dropout)
+
+#         grid_x, grid_y = torch.meshgrid(
+#             torch.linspace(-1, 1, sample_size),
+#             torch.linspace(-1, 1, sample_size),
+#             indexing='ij'
+#         )
+
+#         self.base_grid = nn.Parameter(
+#             torch.stack([grid_x, grid_y], dim=-1).float(),
+#             requires_grad=False
+#         )
+        
+#         # REMOVED: Complex aggregators not needed with better aggregation
+#         # Using simple averaging is more stable and interpretable
+    
+#     def _create_mamba_stack(self, depth, d_model, d_geom):
+#         return nn.ModuleList([
+#             create_multihead_block(
+#                 d_model=d_model,
+#                 d_geom=d_geom,
+#                 rms_norm=True,
+#                 residual_in_fp32=True,
+#                 layer_idx=i,
+#                 block_type='dual_input'
+#             )
+#             for i in range(depth)
+#         ])
+        
+#     def forward(
+#         self,
+#         feat_match_0: torch.Tensor,
+#         feat_match_1: torch.Tensor,
+#         feat_geom_0: torch.Tensor,
+#         feat_geom_1: torch.Tensor,
+#         flow_map_0: torch.Tensor,
+#         flow_map_1: torch.Tensor,
+#         adaptive_spans_x_0: torch.Tensor,
+#         adaptive_spans_y_0: torch.Tensor,
+#         adaptive_spans_x_1: torch.Tensor,
+#         adaptive_spans_y_1: torch.Tensor
+#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+#         """Process with position-adaptive spans."""
+#         B, C, H, W = feat_match_0.shape
+        
+#         # processed_0 = self._process_adaptive_windows(
+#         #     feat_match_0, feat_geom_0,
+#         #     flow_map_0[..., :2], 
+#         #     # flow_map_0[..., 2:],
+#         #     adaptive_spans_x_0, adaptive_spans_y_0,
+#         #     feat_match_1, feat_geom_1
+#         # )
+        
+#         # processed_1 = self._process_adaptive_windows(
+#         #     feat_match_1, feat_geom_1,
+#         #     flow_map_1[..., :2], 
+#         #     # flow_map_1[..., 2:],
+#         #     adaptive_spans_x_1, adaptive_spans_y_1,
+#         #     feat_match_0, feat_geom_0
+#         # )
+#         processed_0 = self._process_adaptive_windows(
+#             feat_match_query=feat_match_0,
+#             feat_geom_query=feat_geom_0,
+#             flow=flow_map_0[..., :2],
+#             spans_x=adaptive_spans_x_0,
+#             spans_y=adaptive_spans_y_0,
+#             target_feat_match=feat_match_1,
+#             target_feat_geom=feat_geom_1
+#         )
+        
+#         # Process 1 -> 0
+#         processed_1 = self._process_adaptive_windows(
+#             feat_match_query=feat_match_1,
+#             feat_geom_query=feat_geom_1,
+#             flow=flow_map_1[..., :2],
+#             spans_x=adaptive_spans_x_1,
+#             spans_y=adaptive_spans_y_1,
+#             target_feat_match=feat_match_0,
+#             target_feat_geom=feat_geom_0
+#         )
+        
+#         return processed_0['match'], processed_1['match'], \
+#                processed_0['geom'], processed_1['geom']
+    
+#     # def _process_adaptive_windows(
+#     #     self,
+#     #     feat_match_query: torch.Tensor,
+#     #     feat_geom_query: torch.Tensor,
+#     #     flow: torch.Tensor,
+#     #     spans_x: torch.Tensor,
+#     #     spans_y: torch.Tensor,
+#     #     target_feat_match: torch.Tensor,
+#     #     target_feat_geom: torch.Tensor
+#     # ) -> dict:
+#     #     """
+#     #     Extracts and processes windows using ASpanFormer-style
+#     #     fixed-length sampling from continuous-sized spans.
+#     #     """
+#     #     B, C_match, H_q, W_q = feat_match_query.shape
+#     #     _, C_geom, _, _ = feat_geom_query.shape
+#     #     N = H_q * W_q # Total number of pixels to process (e.g., 10816)
+        
+#     #     # 1. Flatten all query inputs for chunking
+#     #     # (B, C, H, W) -> (B*N, C)
+#     #     feat_match_query_flat = rearrange(feat_match_query, 'b c h w -> (b h w) c')
+#     #     feat_geom_query_flat = rearrange(feat_geom_query, 'b c h w -> (b h w) c')
+        
+#     #     # (B, H, W, 2) -> (B*N, 2)
+#     #     flow_flat = rearrange(flow, 'b h w c -> (b h w) c')
+#     #     # (B, H, W) -> (B*N)
+#     #     spans_x_flat = rearrange(spans_x, 'b h w -> (b h w)')
+#     #     spans_y_flat = rearrange(spans_y, 'b h w -> (b h w)')
+        
+#     #     # Get query pixel coordinates (for flow offset)
+#     #     coord_y, coord_x = torch.meshgrid(
+#     #         torch.linspace(-1, 1, H_q, device=feat_match_query.device),
+#     #         torch.linspace(-1, 1, W_q, device=feat_match_query.device),
+#     #         indexing='ij'
+#     #     )
+#     #     # (H, W, 2) -> (N, 2)
+#     #     query_coords_flat = rearrange(
+#     #         torch.stack([coord_x, coord_y], dim=-1), 'h w c -> (h w) c'
+#     #     )
+#     #     if B > 1:
+#     #         query_coords_flat = query_coords_flat.repeat(B, 1)
+
+#     #     # 2. Prepare output buffers
+#     #     output_match_flat = torch.zeros_like(feat_match_query_flat)
+#     #     output_geom_flat = torch.zeros_like(feat_geom_query_flat)
+
+#     #     # 3. Process in chunks
+#     #     for i in range(0, N * B, self.chunk_size):
+#     #         # Define the current chunk
+#     #         chunk_slice = slice(i, i + self.chunk_size)
+            
+#     #         fm_chunk_in = feat_match_query_flat[chunk_slice]
+#     #         fg_chunk_in = feat_geom_query_flat[chunk_slice]
+            
+#     #         # 3.1. Extract windows FOR THIS CHUNK
+#     #         windows_match_chunk = self._extract_chunk_grid_sample(
+#     #             target_feat_match, # Full target map
+#     #             flow_flat[chunk_slice],
+#     #             spans_x_flat[chunk_slice],
+#     #             spans_y_flat[chunk_slice],
+#     #             query_coords_flat[chunk_slice]
+#     #         ) # Shape: (chunk_size, seq_len, C_match)
+            
+#     #         windows_geom_chunk = self._extract_chunk_grid_sample(
+#     #             target_feat_geom, # Full target map
+#     #             flow_flat[chunk_slice],
+#     #             spans_x_flat[chunk_slice],
+#     #             spans_y_flat[chunk_slice],
+#     #             query_coords_flat[chunk_slice]
+#     #         ) # Shape: (chunk_size, seq_len, C_geom)
+
+#     #         # 3.2. Process chunk through Mamba
+#     #         # These tensors are small (e.g., [1024, 64, 128]), no OOM
+#     #         for block in self.mamba_blocks:
+#     #             windows_match_chunk, windows_geom_chunk = block(
+#     #                 windows_match_chunk, windows_geom_chunk
+#     #             )
+#     #             windows_match_chunk = self.dropout(windows_match_chunk)
+#     #             windows_geom_chunk = self.dropout(windows_geom_chunk)
+
+#     #         # 3.3. Aggregate chunk results and add residual
+#     #         out_m_chunk = torch.mean(windows_match_chunk, dim=1)
+#     #         out_g_chunk = torch.mean(windows_geom_chunk, dim=1)
+            
+#     #         output_match_flat[chunk_slice] = fm_chunk_in + out_m_chunk
+#     #         output_geom_flat[chunk_slice] = fg_chunk_in + out_g_chunk
+
+#     #     # 4. Reshape back to image format
+#     #     output_match = rearrange(
+#     #         output_match_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
+#     #     )
+#     #     output_geom = rearrange(
+#     #         output_geom_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
+#     #     )
+        
+#     #     return {'match': output_match, 'geom': output_geom}
+#     # as_mamba_block.py の
+#     # _process_adaptive_windows メソッドを以下に置き換えてください。
+
+#     def _process_adaptive_windows(
+#         self,
+#         feat_match_query: torch.Tensor,
+#         feat_geom_query: torch.Tensor, # (B, C_geom, H_q, W_q)
+#         flow: torch.Tensor,
+#         spans_x: torch.Tensor,
+#         spans_y: torch.Tensor,
+#         target_feat_match: torch.Tensor,
+#         target_feat_geom: torch.Tensor
+#     ) -> dict:
+#         """
+#         FIXED (Version 4): 
+#         1. Implements Mamba-based Cross-Attention for *both* match and geom paths
+#            (Query Prepending) to fix all 'grad' errors.
+#         2. Maintains chunking to prevent OOM.
+#         """
+#         B, C_match, H_q, W_q = feat_match_query.shape
+#         _, C_geom, _, _ = feat_geom_query.shape
+#         N = H_q * W_q 
+        
+#         # 1. Flatten all query inputs for chunking
+#         feat_match_query_flat = rearrange(feat_match_query, 'b c h w -> (b h w) c')
+#         feat_geom_query_flat = rearrange(feat_geom_query, 'b c h w -> (b h w) c')
+        
+#         flow_flat = rearrange(flow, 'b h w c -> (b h w) c')
+#         spans_x_flat = rearrange(spans_x, 'b h w -> (b h w)')
+#         spans_y_flat = rearrange(spans_y, 'b h w -> (b h w)')
+        
+#         coord_y, coord_x = torch.meshgrid(
+#             torch.linspace(-1, 1, H_q, device=feat_match_query.device),
+#             torch.linspace(-1, 1, W_q, device=feat_match_query.device),
+#             indexing='ij'
+#         )
+#         query_coords_flat = rearrange(
+#             torch.stack([coord_x, coord_y], dim=-1), 'h w c -> (h w) c'
+#         )
+#         if B > 1:
+#             query_coords_flat = query_coords_flat.repeat(B, 1)
+
+#         # 2. Prepare output buffers
+#         output_match_flat = torch.zeros_like(feat_match_query_flat)
+#         output_geom_flat = torch.zeros_like(feat_geom_query_flat)
+
+#         # 3. Process in chunks (OOM対策)
+#         for i in range(0, N * B, self.chunk_size):
+#             chunk_slice = slice(i, i + self.chunk_size)
+            
+#             # === Query Tokens ===
+#             query_match_chunk = feat_match_query_flat[chunk_slice].unsqueeze(1)
+#             query_geom_chunk = feat_geom_query_flat[chunk_slice].unsqueeze(1)
+            
+#             # === Key/Value Tokens (Match) ===
+#             windows_match_chunk = self._extract_chunk_grid_sample(
+#                 target_feat_match, 
+#                 flow_flat[chunk_slice],
+#                 spans_x_flat[chunk_slice],
+#                 spans_y_flat[chunk_slice],
+#                 query_coords_flat[chunk_slice]
+#             ) # Shape: (chunk_size, seq_len, C_match)
+            
+#             # === Key/Value Tokens (Geom) (FIXED: 'grad is None' 対策) ===
+#             windows_geom_chunk = self._extract_chunk_grid_sample(
+#                 target_feat_geom, # 本物のgeom特徴をサンプリング
+#                 flow_flat[chunk_slice],
+#                 spans_x_flat[chunk_slice],
+#                 spans_y_flat[chunk_slice],
+#                 query_coords_flat[chunk_slice]
+#             ) # Shape: (chunk_size, seq_len, C_geom)
+
+#             # === Cross-Attention (Query Prepending) ===
+#             seq_match = torch.cat([query_match_chunk, windows_match_chunk], dim=1)
+#             seq_geom = torch.cat([query_geom_chunk, windows_geom_chunk], dim=1)
+            
+#             for block in self.mamba_blocks:
+#                 # 両方のパスをMamba で処理
+#                 seq_match, seq_geom = block(seq_match, seq_geom) 
+#                 seq_match = self.dropout(seq_match)
+#                 seq_geom = self.dropout(seq_geom)
+
+#             # === Aggregation (両方のパス) ===
+#             out_m_chunk = seq_match[:, 0, :] # 更新されたQueryトークン
+#             out_g_chunk = seq_geom[:, 0, :] # 更新されたQueryトークン
+            
+#             output_match_flat[chunk_slice] = query_match_chunk.squeeze(1) + out_m_chunk
+#             output_geom_flat[chunk_slice] = query_geom_chunk.squeeze(1) + out_g_chunk
+
+#         # 4. Reshape back to image format
+#         output_match = rearrange(
+#             output_match_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
+#         )
+#         output_geom = rearrange(
+#             output_geom_flat, '(b h w) c -> b c h w', b=B, h=H_q, w=W_q
+#         )
+        
+#         return {'match': output_match, 'geom': output_geom}
+
+    
+#     def _extract_chunk_grid_sample(
+#         self,
+#         features_target: torch.Tensor, # (B, C, H_t, W_t)
+#         flow_chunk: torch.Tensor,      # (chunk_size, 2) - (x, y) flow offset
+#         spans_x_chunk: torch.Tensor,   # (chunk_size)
+#         spans_y_chunk: torch.Tensor,   # (chunk_size)
+#         query_coords_chunk: torch.Tensor # (chunk_size, 2)
+#     ) -> torch.Tensor:
+#         """
+#         Vectorized ASpanFormer-style extraction for a CHUNK of pixels.
+#         """
+#         B_feat, C, H_t, W_t = features_target.shape
+#         # B_feat is the *original* batch size (e.g., 1)
+        
+#         chunk_size = flow_chunk.shape[0]
+#         device = features_target.device
+        
+#         # --- 1. Create grid for this chunk ---
+        
+#         # Denormalize flow from pixel-space to [-1, 1] space
+#         flow_norm = flow_chunk.clone()
+#         flow_norm[..., 0] = 2.0 * flow_chunk[..., 0] / (W_t - 1)
+#         flow_norm[..., 1] = 2.0 * flow_chunk[..., 1] / (H_t - 1)
+        
+#         # Center of sampling grid: query_coord + flow
+#         # (chunk_size, 2)
+#         centers = query_coords_chunk + flow_norm
+        
+#         # Normalize spans from pixel-space to [0, 2] space
+#         scales_x = 2.0 * spans_x_chunk / (W_t - 1)
+#         scales_y = 2.0 * spans_y_chunk / (H_t - 1)
+#         scales = torch.stack([scales_x, scales_y], dim=-1) # (chunk_size, 2)
+
+#         # --- 2. Scale and shift the base grid ---
+#         seq_len = self.seq_len
+#         # (1, seq_len, 2)
+#         base_grid_flat = self.base_grid.view(1, seq_len, 2)
+        
+#         scales = scales.unsqueeze(1)    # (chunk_size, 1, 2)
+#         centers = centers.unsqueeze(1)  # (chunk_size, 1, 2)
+        
+#         # grid shape: (chunk_size, seq_len, 2)
+#         grid = base_grid_flat * scales + centers
+        
+#         # --- 3. Sample from features ---
+        
+#         # We assume B_feat (from features_target) is 1.
+#         # If B_feat > 1, this logic needs to be more complex
+#         # (matching chunk indices to batch indices).
+#         # But for training (B=1 per GPU), this is fine.
+#         if B_feat > 1:
+#             # TODO: This requires indexing features_target with batch indices
+#             # For now, we assume B=1, which is common.
+#             pass
+            
+#         # grid_sample expects grid (B, H_out, W_out, 2)
+#         # We reshape grid to: (1, chunk_size, seq_len, 2)
+#         grid = grid.view(1, chunk_size, seq_len, 2)
+            
+#         # Perform sampling
+#         # window: (1, C, chunk_size, seq_len)
+#         window = F.grid_sample(
+#             features_target,    # Input (B=1, C, H_t, W_t)
+#             grid,               # Grid (B=1, chunk_size, seq_len, 2)
+#             mode='bilinear',
+#             align_corners=True, 
+#             padding_mode='zeros'
+#         )
+        
+#         # Reshape for Mamba: (1, C, chunk_size, seq_len) -> (chunk_size, seq_len, C)
+#         window = window.permute(0, 2, 3, 1).view(chunk_size, seq_len, C)
+        
+#         return window
+
+    
+#     def _extract_windows_grid_sample_scaled(
+#         self,
+#         features_target: torch.Tensor, # (B, C, H_t, W_t)
+#         flow: torch.Tensor,            # (B, H_q, W_q, 2) - (x, y) flow
+#         spans_x: torch.Tensor,         # (B, H_q, W_q) - adaptive physical width
+#         spans_y: torch.Tensor          # (B, H_q, W_q) - adaptive physical height
+#     ) -> torch.Tensor:
+#         """
+#         Vectorized ASpanFormer-style window extraction.
+        
+#         FIXED: Resolves grid_sampler batch size mismatch error.
+#         """
+#         B, C, H_t, W_t = features_target.shape
+#         _, H_q, W_q, _ = flow.shape
+        
+#         device = features_target.device
+        
+#         # --- 1. Create pixel-wise sampling grid ---
+        
+#         # Get query pixel coordinates (normalized [-1, 1])
+#         coord_y, coord_x = torch.meshgrid(
+#             torch.linspace(-1, 1, H_q, device=device),
+#             torch.linspace(-1, 1, W_q, device=device),
+#             indexing='ij'
+#         )
+#         query_coords = torch.stack([coord_x, coord_y], dim=-1)
+        
+#         # Denormalize flow from pixel-space to [-1, 1] space
+#         flow_norm = flow.clone()
+#         flow_norm[..., 0] = 2.0 * flow[..., 0] / (W_t - 1)
+#         flow_norm[..., 1] = 2.0 * flow[..., 1] / (H_t - 1)
+        
+#         # Center of sampling grid: query_coord + flow
+#         centers = query_coords.unsqueeze(0) + flow_norm # (B, H_q, W_q, 2)
+        
+#         # Scale of sampling grid: spans_x/y
+#         scales_x = 2.0 * spans_x / (W_t - 1)
+#         scales_y = 2.0 * spans_y / (H_t - 1)
+#         scales = torch.stack([scales_x, scales_y], dim=-1) # (B, H_q, W_q, 2)
+
+#         # --- 2. Scale and shift the base grid ---
+#         seq_len = self.seq_len
+#         # (1, 1, 1, seq_len, 2)
+#         base_grid_flat = self.base_grid.view(1, 1, 1, seq_len, 2)
+        
+#         scales = scales.unsqueeze(-2)    # (B, H_q, W_q, 1, 2)
+#         centers = centers.unsqueeze(-2)  # (B, H_q, W_q, 1, 2)
+        
+#         # grid shape: (B, H_q, W_q, seq_len, 2)
+#         grid = base_grid_flat * scales + centers
+        
+#         # --- 3. Sample from features (Looping over Batch B) ---
+        
+#         N = H_q * W_q # Number of query pixels (e.g., 16*16=256)
+        
+#         all_windows = []
+#         for b in range(B):
+#             # Get features for this batch item
+#             # features_b: (1, C, H_t, W_t)
+#             features_b = features_target[b:b+1]
+            
+#             # Get grid for this batch item
+#             # grid_b: (H_q, W_q, seq_len, 2)
+#             grid_b = grid[b]
+            
+#             # Reshape grid for F.grid_sample
+#             # We want B_out=1, H_out=N, W_out=seq_len
+#             # ** FIX IS HERE **
+#             # grid_b_reshaped: (1, N, seq_len, 2)
+#             # (e.g., [1, 256, 64, 2])
+#             grid_b_reshaped = grid_b.view(1, N, seq_len, 2)
+            
+#             # Perform sampling
+#             # window_b: (1, C, N, seq_len)
+#             window_b = F.grid_sample(
+#                 features_b,         # Input (B=1)
+#                 grid_b_reshaped,    # Grid (B=1)
+#                 mode='bilinear',
+#                 align_corners=True, # Use True, consistent with LoFTR/ASpanFormer
+#                 padding_mode='zeros'
+#             )
+#             all_windows.append(window_b)
+        
+#         # windows: (B, C, N, seq_len)
+#         windows = torch.cat(all_windows, dim=0)
+        
+#         # Reshape for Mamba: (B, C, N, seq_len) -> (B, N, seq_len, C)
+#         windows = windows.permute(0, 2, 3, 1)
+        
+#         # Flatten B and N: (B * N, seq_len, C)
+#         windows = windows.reshape(B * N, seq_len, C)
+        
+#         return windows
     
     # def _process_adaptive_windows(
     #     self,
